@@ -1,14 +1,16 @@
 import os
+import re
 import streamlit as st
 import pdfplumber
 import google.generativeai as genai
 from textwrap import wrap
 
-# ============================
-# CONFIG
-# ============================
 
-APP_PASSWORD = "swisscareer"   # change if you want
+# =============================
+# CONFIG
+# =============================
+
+APP_PASSWORD = "swisscareer"   # keep or change as you like
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -20,38 +22,46 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-MAX_CHUNK_SIZE = 6000   # safe for Gemini
+MAX_CHUNK_SIZE = 4000
 
 
-# ============================
-# HELPERS
-# ============================
+# =============================
+# TEXT CLEANING
+# =============================
+
+def clean_text(text):
+    text = text.encode("utf-8", "ignore").decode()
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 
 def extract_pdf_text(file):
     text = ""
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            if page.extract_text():
-                text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + " "
     return clean_text(text)
 
 
-def clean_text(text):
-    return " ".join(text.replace("\n", " ").split())
+def chunk_text(text):
+    return wrap(text, MAX_CHUNK_SIZE)
 
 
-def chunk_text(text, size=MAX_CHUNK_SIZE):
-    return wrap(text, size)
-
+# =============================
+# GEMINI CALL
+# =============================
 
 def call_gemini(prompt):
     response = model.generate_content(prompt)
     return response.text.strip()
 
 
-# ============================
+# =============================
 # CORE ANALYSIS
-# ============================
+# =============================
 
 def run_analysis(cv_text, jd_text):
 
@@ -61,26 +71,27 @@ def run_analysis(cv_text, jd_text):
     cv_summary = ""
     jd_summary = ""
 
-    # ---- Summarise CV ----
+    # ---- CV summarisation ----
+
     for chunk in cv_chunks:
         prompt = f"""
-Summarise the following CV content clearly focusing on:
-- skills
-- experience
-- seniority
-- life sciences relevance
-- Swiss market readiness
+Summarise the following CV content focusing on:
+- professional experience
+- technical and scientific skills
+- seniority level
+- relevance for Swiss Life Sciences market
 
 TEXT:
 {chunk}
 """
         cv_summary += call_gemini(prompt) + "\n"
 
-    # ---- Summarise JD ----
+    # ---- JD summarisation ----
+
     for chunk in jd_chunks:
         prompt = f"""
-Summarise this job description focusing on:
-- required skills
+Summarise the following job description focusing on:
+- required competencies
 - keywords
 - seniority
 - expectations
@@ -90,20 +101,20 @@ TEXT:
 """
         jd_summary += call_gemini(prompt) + "\n"
 
-    # ---- Final Swiss style analysis ----
+    # ---- Final Swiss market analysis ----
 
     final_prompt = f"""
-You are a Swiss Life Sciences recruiter.
+You are a senior Swiss Life Sciences recruiter.
 
-Analyse this CV against Swiss hiring standards and the job description.
+Analyse the CV against Swiss hiring standards and the job description.
 
 Focus on:
 
-1. Swiss CV structure issues
-2. Missing keywords
-3. Seniority mismatch
-4. Searchability (ATS + LinkedIn logic)
-5. Cultural fit for Switzerland
+1. Swiss CV structure and formatting issues
+2. Missing or weak keywords (ATS + LinkedIn searchability)
+3. Seniority alignment
+4. Market competitiveness in Switzerland
+5. Cultural and communication fit
 6. Concrete improvement actions
 
 CV SUMMARY:
@@ -112,22 +123,20 @@ CV SUMMARY:
 JOB DESCRIPTION SUMMARY:
 {jd_summary}
 
-Deliver in clear sections with bullet points.
+Provide structured sections with bullet points.
 Be precise and professional.
 """
 
     return call_gemini(final_prompt)
 
 
-# ============================
+# =============================
 # STREAMLIT UI
-# ============================
+# =============================
 
 st.set_page_config(page_title="Swiss CV Analyser", layout="centered")
 
 st.title("Swiss CV & Job Fit Analyser")
-
-# ---- Password gate ----
 
 password = st.text_input("Enter access password", type="password")
 
@@ -136,12 +145,11 @@ if password != APP_PASSWORD:
 
 st.success("Access granted")
 
-# ---- Uploads ----
-
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_file = st.file_uploader("Upload Job Description (optional PDF)", type=["pdf"])
+jd_file = st.file_uploader("Upload Job Description (PDF optional)", type=["pdf"])
 
 jd_text_manual = st.text_area("Or paste Job Description text (optional)")
+
 
 if st.button("Run Analysis"):
 
@@ -161,8 +169,9 @@ if st.button("Run Analysis"):
     st.info(f"CV characters: {len(cv_text)}")
     st.info(f"JD characters: {len(jd_text)}")
 
-    with st.spinner("Analysing with Swiss market logic..."):
+    with st.spinner("Running Swiss market analysis..."):
         result = run_analysis(cv_text, jd_text)
 
-    st.subheader("Swiss CV Analysis Result")
+    st.subheader("Analysis Result")
+
     st.write(result)

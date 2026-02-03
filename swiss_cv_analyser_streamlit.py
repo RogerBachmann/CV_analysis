@@ -3,47 +3,37 @@ import pdfplumber
 import google.generativeai as genai
 from textwrap import wrap
 import re
+import io
 
-# --- Configuration ---
-APP_PASSWORD = "swisscareer"
-MAX_CHUNK_SIZE = 10000 
+# --- Page Configuration ---
+st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨🇭", layout="wide")
 
-# --- Page Config ---
-st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨🇭")
-
-# --- API Key from Streamlit Secrets ---
+# --- API & Password from Streamlit Secrets ---
 try:
+    # Pulling credentials from the Secrets section of your Streamlit Dashboard
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+    
     genai.configure(api_key=GEMINI_API_KEY)
-except KeyError:
-    st.error("Error: GEMINI_API_KEY not found in Streamlit Secrets.")
-    st.info("Please add GEMINI_API_KEY to your secrets.toml or Streamlit Cloud settings.")
+except KeyError as e:
+    st.error(f"Error: Secret {e} not found in Streamlit Secrets.")
+    st.info("Ensure GEMINI_API_KEY and APP_PASSWORD are added to your Streamlit Cloud 'Secrets' settings.")
     st.stop()
 
 # --- Model Discovery ---
 @st.cache_resource
 def get_best_model():
     """Finds the best available model for your specific API key."""
-    # Priority list for 2026 standards
-    MODEL_PRIORITY = [
-        "gemini-3-flash", 
-        "gemini-3-flash-preview", 
-        "gemini-2.5-flash", 
-        "gemini-2.0-flash",
-        "gemini-1.5-flash-latest"
-    ]
+    MODEL_PRIORITY = ["gemini-3-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"]
     try:
         available_models = [m.name.split('/')[-1] for m in genai.list_models() 
                            if 'generateContent' in m.supported_generation_methods]
-        
         for model_name in MODEL_PRIORITY:
             if model_name in available_models:
                 return genai.GenerativeModel(model_name)
-        
         return genai.GenerativeModel(available_models[0])
-    except Exception as e:
-        st.error(f"Could not connect to Gemini API: {e}")
-        st.stop()
+    except Exception:
+        return genai.GenerativeModel("gemini-1.5-flash")
 
 model_instance = get_best_model()
 
@@ -56,7 +46,7 @@ def clean_text(text):
 def extract_pdf_text(file):
     text = ""
     try:
-        with pdfplumber.open(file) as pdf:
+        with pdfplumber.open(io.BytesIO(file.read())) as pdf:
             for page in pdf.pages:
                 content = page.extract_text()
                 if content: text += content + " "
@@ -74,75 +64,113 @@ def call_gemini(prompt):
         return f"\n[Model Error: {str(e)}]\n"
 
 def run_analysis(cv_text, jd_text):
-    cv_chunks = wrap(cv_text, MAX_CHUNK_SIZE)
-    jd_chunks = wrap(jd_text, MAX_CHUNK_SIZE) if jd_text else []
+    cv_chunks = wrap(cv_text, 10000)
+    jd_chunks = wrap(jd_text, 10000) if jd_text else []
 
     cv_summary = ""
     jd_summary = ""
 
-    progress = st.progress(0, text="Recruiter is analyzing your profile...")
+    progress = st.progress(0, text="Swiss Recruiter AI is processing your CV...")
 
-    # Summarize CV
+    # Processing Chunks
     for i, chunk in enumerate(cv_chunks):
-        cv_summary += call_gemini(f"Summarise this CV for a Swiss Life Sciences role:\n\n{chunk}") + "\n"
+        cv_summary += call_gemini(f"Extract key career facts, technical skills, and achievements from this CV chunk:\n\n{chunk}") + "\n"
         progress.progress((i + 0.5) / (len(cv_chunks) + max(len(jd_chunks), 1)))
 
-    # Summarize JD
     for i, chunk in enumerate(jd_chunks):
-        jd_summary += call_gemini(f"Summarise this Job Description:\n\n{chunk}") + "\n"
+        jd_summary += call_gemini(f"Extract core requirements and required KPIs from this Job Description:\n\n{chunk}") + "\n"
         progress.progress((len(cv_chunks) + i + 1) / (len(cv_chunks) + len(jd_chunks)))
 
+    # FINAL CV ANALYSIS PROMPT
     final_prompt = f"""
-    You are a Senior Swiss Life Sciences Recruiter (Basel/Zurich/Zug hubs).
-    Analyse this CV against Swiss standards and the Job Description.
+    You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the Job Description.
     
-    REQUIRED HEADERS:
-    1. **Swiss Market Fit** (Photo presence, Nationality/Work Permit info, Language levels A1-C2)
-    2. **Technical Gap Analysis** (Specific keyword discrepancies)
-    3. **Seniority & Salary Alignment** (Swiss industry standard alignment)
-    4. **ATS & Visibility Optimization**
-    5. **Priority Checklist** (Top 3 immediate improvements)
+    CRITICAL: For every section, lead with 'The Fact' (a statistic or Swiss hiring standard).
+    
+    STRUCTURE FOR WORD TEMPLATE:
+    ## 1. CV PERFORMANCE SCORECARD
+    **OVERALL JOB-FIT SCORE: [Score]/100**
+    (Based on Technical Gap Analysis, Swiss Market Compliance, and Impact-Evidence)
 
-    CV SUMMARY: {cv_summary}
-    JD SUMMARY: {jd_summary if jd_summary else "General Swiss Life Sciences Market Standard"}
+    ## 2. DETAILED CV AUDIT
+
+    ### 2.1 SWISS COMPLIANCE & FORMATTING
+    - **The Fact:** 85% of Swiss recruiters expect to see Nationality/Permit status and language levels (A1-C2) clearly stated. A missing photo can reduce engagement by 15-20% in the DACH region.
+    - **Audit:** [Review photo, personal data, and layout professionality]
+    - **Strengthening:** [Specific layout/data changes]
+
+    ### 2.2 TECHNICAL & KEYWORD ALIGNMENT
+    - **The Fact:** ATS systems and recruiters spend an average of 6 seconds on an initial screen; 75% of CVs are rejected because keywords from the JD are not found in the 'Professional Experience' bullets.
+    - **Audit:** [Map CV skills against JD requirements]
+    - **Strengthening:** [List 10 specific keywords/skills to integrate]
+
+    ### 2.3 EVIDENCE OF IMPACT (KPIs)
+    - **The Fact:** CVs in Life Sciences with quantifiable metrics (e.g., 'Reduced deviations by 20%') have a 40% higher chance of reaching the interview stage.
+    - **Audit:** [Analyze current bullet points for quantifiable results]
+    - **Strengthening:** [Suggest 5 KPI-based bullet points based on the role]
+
+    ### 2.4 SENIORITY & SALARY EXPECTATION
+    - **The Fact:** In the Basel/Zurich hub, titles like 'Senior' or 'Lead' have specific year-of-experience benchmarks. Misalignment leads to automatic rejection.
+    - **Audit:** [Does this candidate's history match the seniority of the JD?]
+    - **Strengthening:** [How to reposition the narrative to match the target level]
+
+    ## 3. PRIORITY ACTION PLAN (TOP 3 IMPROVEMENTS)
+    1. [Most Urgent]
+    2. [High Impact]
+    3. [Strategic Tip]
+
+    CV DATA: {cv_summary}
+    JD DATA: {jd_summary if jd_summary else "General Swiss Life Sciences Market Standard"}
     """
     
     result = call_gemini(final_prompt)
     progress.empty()
     return result
 
-# --- UI ---
+# --- UI Interface ---
 st.title("🇨🇭 Swiss CV & Job Fit Analyser")
-st.sidebar.caption(f"Connected to: {model_instance.model_name}")
 
-# App Password Protection
-pass_input = st.text_input("Enter App Password", type="password")
+# Sidebar Authentication using Secrets
+pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
 if pass_input != APP_PASSWORD:
-    if pass_input: st.error("Incorrect Password")
+    if pass_input: st.sidebar.error("Incorrect Password")
+    st.info("Authenticate in the sidebar to begin analysis.")
     st.stop()
 
-# Uploads
+st.sidebar.success("✅ Authenticated")
+st.sidebar.caption(f"Model: {model_instance.model_name}")
+
+# Main Layout
 col1, col2 = st.columns(2)
 with col1:
+    st.subheader("1. Upload CV")
     cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-with col2:
-    jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
 
-jd_manual = st.text_area("Or paste Job Description text here")
+with col2:
+    st.subheader("2. Target Job")
+    jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
+    jd_manual = st.text_area("Or paste JD text manually", height=150)
 
 if st.button("🚀 Run Analysis"):
     if not cv_file:
-        st.warning("Please upload a CV.")
+        st.warning("Please upload a CV to proceed.")
     else:
         with st.spinner("Analyzing..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else clean_text(jd_manual)
             
             if not cv_raw:
-                st.error("Could not read CV. Check if the file is empty or scanned as an image.")
+                st.error("Text extraction failed. Please ensure the PDF is not an image.")
             else:
                 report = run_analysis(cv_raw, jd_raw)
                 st.divider()
-                st.subheader("Professional Recruiter Feedback")
+                st.subheader("Professional CV Audit Report")
                 st.markdown(report)
-                st.download_button("Download Report", report, "Swiss_CV_Analysis.txt")
+                
+                # Download button for Word Template use
+                st.download_button(
+                    label="📩 Download Report for Word",
+                    data=report,
+                    file_name="Swiss_CV_Audit.txt",
+                    mime="text/plain"
+                )

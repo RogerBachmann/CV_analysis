@@ -5,22 +5,33 @@ import pdfplumber
 import google.generativeai as genai
 from textwrap import wrap
 
-# Configuration
+# --- Configuration & Security ---
 APP_PASSWORD = "swisscareer"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Use Gemini 3 Flash for the best balance of speed and intelligence in 2026
+MODEL_NAME = "gemini-3-flash"
+MAX_CHUNK_SIZE = 8000  # Gemini 3 handles larger contexts easily
+
+# --- Page Config ---
+st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨🇭")
+
+# Sidebar for API Key Management
+st.sidebar.title("Settings")
+api_key_input = st.sidebar.text_input("Enter Gemini API Key", type="password")
+GEMINI_API_KEY = api_key_input or os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    st.error("GEMINI_API_KEY not found in environment variables.")
+    st.info("Please enter your Gemini API Key in the sidebar or set it as an environment variable.")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel(MODEL_NAME)
 
-MAX_CHUNK_SIZE = 4000
+# --- Helper Functions ---
 
 def clean_text(text):
     if not text:
         return ""
+    # Remove non-printable characters and normalize whitespace
     text = text.encode("utf-8", "ignore").decode()
     text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
     text = re.sub(r"\s+", " ", text)
@@ -39,101 +50,108 @@ def extract_pdf_text(file):
         st.error(f"Error reading PDF: {e}")
         return ""
 
-def chunk_text(text):
-    if not text:
-        return []
-    return wrap(text, MAX_CHUNK_SIZE)
-
 def call_gemini(prompt):
-    # Check for empty prompt
-    if not prompt or not prompt.strip():
+    if not prompt.strip():
         return ""
     try:
-        # Pass the string directly rather than a list for simple text
+        # Direct string call for text generation
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        return f"Error calling Gemini: {str(e)}"
+        return f"\n[Model Error: {str(e)}]\n"
 
 def run_analysis(cv_text, jd_text):
-    cv_chunks = chunk_text(cv_text)
-    jd_chunks = chunk_text(jd_text) if jd_text else []
+    # Split text into manageable chunks
+    cv_chunks = wrap(cv_text, MAX_CHUNK_SIZE) if cv_text else []
+    jd_chunks = wrap(jd_text, MAX_CHUNK_SIZE) if jd_text else []
 
     cv_summary = ""
     jd_summary = ""
 
-    # Progress bar for better UX
-    progress_bar = st.progress(0)
+    progress_bar = st.progress(0, text="Analyzing documents...")
     
+    # Process CV
     for i, chunk in enumerate(cv_chunks):
-        if chunk.strip():
-            prompt = f"Summarise this CV content for Swiss Life Sciences hiring:\n\n{chunk}"
-            cv_summary += call_gemini(prompt) + "\n"
+        prompt = f"Summarise this CV content for Swiss Life Sciences hiring:\n\n{chunk}"
+        cv_summary += call_gemini(prompt) + "\n"
         progress_bar.progress((i + 1) / (len(cv_chunks) + (len(jd_chunks) or 1)))
 
+    # Process JD
     for i, chunk in enumerate(jd_chunks):
-        if chunk.strip():
-            prompt = f"Summarise this job description:\n\n{chunk}"
-            jd_summary += call_gemini(prompt) + "\n"
-        # Update progress for JD chunks
-        progress_val = (len(cv_chunks) + i + 1) / (len(cv_chunks) + len(jd_chunks))
-        progress_bar.progress(min(progress_val, 1.0))
+        prompt = f"Summarise this job description:\n\n{chunk}"
+        jd_summary += call_gemini(prompt) + "\n"
+        # Avoid division by zero if no JD
+        total_steps = len(cv_chunks) + len(jd_chunks)
+        progress_bar.progress((len(cv_chunks) + i + 1) / total_steps)
 
     final_prompt = f"""
-You are a senior Swiss Life Sciences recruiter.
-Analyse this CV against Swiss standards and the job description.
+You are an expert senior Swiss Life Sciences recruiter (specializing in Basel/Zurich hubs).
+Analyse the CV against Swiss market standards and the provided job description.
 
-Focus on:
-- Swiss CV structure (e.g., photo requirements, personal details, language levels)
-- Keyword gaps
-- ATS searchability
-- Seniority alignment
-- Concrete improvements
+Focus your feedback on:
+1. **Swiss CV Standards:** (e.g., Inclusion of photo/DOB/nationality, language proficiency levels A1-C2, and layout).
+2. **Technical Gaps:** Keyword discrepancies between CV and JD.
+3. **ATS Optimization:** How to improve searchability for internal HR systems.
+4. **Cultural Fit:** Swiss work culture alignment (precision, reliability, certifications).
+5. **Seniority:** Does the experience match the JD level?
 
 CV SUMMARY:
 {cv_summary}
 
 JD SUMMARY:
-{jd_summary if jd_summary else "No job description provided. Analyse the CV generally for Swiss Life Sciences standards."}
+{jd_summary if jd_summary.strip() else "No JD provided. Provide a general Swiss market analysis."}
 """
+
     result = call_gemini(final_prompt)
     progress_bar.empty()
     return result
 
-# --- Streamlit UI ---
+# --- Main UI ---
 st.title("🇨🇭 Swiss CV & Job Fit Analyser")
 
-password = st.text_input("Password", type="password")
-
+# Simple Password Protection
+password = st.text_input("Application Password", type="password")
 if password != APP_PASSWORD:
     if password:
-        st.error("Incorrect password")
+        st.error("Incorrect Password")
     st.stop()
 
-cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_file = st.file_uploader("Upload JD (PDF optional)", type=["pdf"])
-jd_text_manual = st.text_area("Or paste JD text")
+# Layout for Uploads
+col1, col2 = st.columns(2)
+with col1:
+    cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
+with col2:
+    jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
 
-if st.button("Run Analysis"):
+jd_text_manual = st.text_area("Or paste JD text here")
+
+if st.button("Run Swiss Market Analysis"):
     if not cv_file:
-        st.warning("Please upload a CV first.")
+        st.warning("Please upload a CV to begin.")
         st.stop()
 
-    with st.spinner("Extracting and analyzing..."):
-        cv_text = extract_pdf_text(cv_file)
+    with st.spinner("Recruiter is reviewing your profile..."):
+        cv_content = extract_pdf_text(cv_file)
         
         if jd_file:
-            jd_text = extract_pdf_text(jd_file)
+            jd_content = extract_pdf_text(jd_file)
         else:
-            jd_text = clean_text(jd_text_manual)
+            jd_content = clean_text(jd_text_manual)
 
-        if not cv_text:
-            st.error("Could not extract text from CV.")
+        if not cv_content:
+            st.error("Could not read CV content. Please ensure the PDF is not password protected.")
             st.stop()
 
-        st.info(f"CV Processed: {len(cv_text)} characters")
+        # Display Stats
+        st.caption(f"CV: {len(cv_content)} chars | JD: {len(jd_content)} chars")
         
-        result = run_analysis(cv_text, jd_text)
+        # Run Analysis
+        analysis_result = run_analysis(cv_content, jd_content)
 
-        st.subheader("Analysis Results")
-        st.markdown(result)
+        # Output
+        st.divider()
+        st.subheader("Analysis & Recommendations")
+        st.markdown(analysis_result)
+
+        # Download button for the report
+        st.download_button("Download Report", analysis_result, file_name="Swiss_CV_Analysis.md")

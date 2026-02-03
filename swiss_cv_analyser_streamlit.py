@@ -5,17 +5,12 @@ import pdfplumber
 import google.generativeai as genai
 from textwrap import wrap
 
-
-# =============================
-# CONFIG
-# =============================
-
-APP_PASSWORD = "swisscareer"   # keep or change as you like
+APP_PASSWORD = "swisscareer"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    st.error("GEMINI_API_KEY not found in environment variables")
+    st.error("GEMINI_API_KEY not found")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -24,10 +19,6 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 
 MAX_CHUNK_SIZE = 4000
 
-
-# =============================
-# TEXT CLEANING
-# =============================
 
 def clean_text(text):
     text = text.encode("utf-8", "ignore").decode()
@@ -40,9 +31,9 @@ def extract_pdf_text(file):
     text = ""
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + " "
+            t = page.extract_text()
+            if t:
+                text += t + " "
     return clean_text(text)
 
 
@@ -50,18 +41,10 @@ def chunk_text(text):
     return wrap(text, MAX_CHUNK_SIZE)
 
 
-# =============================
-# GEMINI CALL
-# =============================
-
 def call_gemini(prompt):
-    response = model.generate_content(prompt)
+    response = model.generate_content([prompt])   # <<< FIX
     return response.text.strip()
 
-
-# =============================
-# CORE ANALYSIS
-# =============================
 
 def run_analysis(cv_text, jd_text):
 
@@ -71,107 +54,73 @@ def run_analysis(cv_text, jd_text):
     cv_summary = ""
     jd_summary = ""
 
-    # ---- CV summarisation ----
-
     for chunk in cv_chunks:
         prompt = f"""
-Summarise the following CV content focusing on:
-- professional experience
-- technical and scientific skills
-- seniority level
-- relevance for Swiss Life Sciences market
+Summarise this CV content for Swiss Life Sciences hiring:
 
-TEXT:
 {chunk}
 """
         cv_summary += call_gemini(prompt) + "\n"
 
-    # ---- JD summarisation ----
-
     for chunk in jd_chunks:
         prompt = f"""
-Summarise the following job description focusing on:
-- required competencies
-- keywords
-- seniority
-- expectations
+Summarise this job description:
 
-TEXT:
 {chunk}
 """
         jd_summary += call_gemini(prompt) + "\n"
 
-    # ---- Final Swiss market analysis ----
-
     final_prompt = f"""
 You are a senior Swiss Life Sciences recruiter.
 
-Analyse the CV against Swiss hiring standards and the job description.
+Analyse this CV against Swiss standards and the job description.
 
 Focus on:
-
-1. Swiss CV structure and formatting issues
-2. Missing or weak keywords (ATS + LinkedIn searchability)
-3. Seniority alignment
-4. Market competitiveness in Switzerland
-5. Cultural and communication fit
-6. Concrete improvement actions
+- Swiss CV structure
+- keyword gaps
+- ATS searchability
+- seniority alignment
+- concrete improvements
 
 CV SUMMARY:
 {cv_summary}
 
-JOB DESCRIPTION SUMMARY:
+JD SUMMARY:
 {jd_summary}
-
-Provide structured sections with bullet points.
-Be precise and professional.
 """
 
     return call_gemini(final_prompt)
 
 
-# =============================
-# STREAMLIT UI
-# =============================
-
-st.set_page_config(page_title="Swiss CV Analyser", layout="centered")
-
 st.title("Swiss CV & Job Fit Analyser")
 
-password = st.text_input("Enter access password", type="password")
+password = st.text_input("Password", type="password")
 
 if password != APP_PASSWORD:
     st.stop()
 
-st.success("Access granted")
-
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_file = st.file_uploader("Upload Job Description (PDF optional)", type=["pdf"])
+jd_file = st.file_uploader("Upload JD (PDF optional)", type=["pdf"])
 
-jd_text_manual = st.text_area("Or paste Job Description text (optional)")
-
+jd_text_manual = st.text_area("Or paste JD text")
 
 if st.button("Run Analysis"):
 
     if not cv_file:
-        st.warning("Please upload a CV PDF")
+        st.warning("Upload CV first")
         st.stop()
 
-    with st.spinner("Reading CV..."):
-        cv_text = extract_pdf_text(cv_file)
+    cv_text = extract_pdf_text(cv_file)
 
     if jd_file:
-        with st.spinner("Reading Job Description..."):
-            jd_text = extract_pdf_text(jd_file)
+        jd_text = extract_pdf_text(jd_file)
     else:
         jd_text = clean_text(jd_text_manual)
 
-    st.info(f"CV characters: {len(cv_text)}")
-    st.info(f"JD characters: {len(jd_text)}")
+    st.write("CV chars:", len(cv_text))
+    st.write("JD chars:", len(jd_text))
 
-    with st.spinner("Running Swiss market analysis..."):
-        result = run_analysis(cv_text, jd_text)
+    result = run_analysis(cv_text, jd_text)
 
-    st.subheader("Analysis Result")
-
+    st.subheader("Result")
     st.write(result)

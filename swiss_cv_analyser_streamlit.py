@@ -8,7 +8,7 @@ from textwrap import wrap
 # --- Configuration & Security ---
 APP_PASSWORD = "swisscareer"
 # Use Gemini 3 Flash for the best balance of speed and intelligence in 2026
-MODEL_NAME = "gemini-3-flash"
+MODEL_NAME = "gemini-1.5-flash-latest"
 MAX_CHUNK_SIZE = 8000  # Gemini 3 handles larger contexts easily
 
 # --- Page Config ---

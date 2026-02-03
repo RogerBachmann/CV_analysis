@@ -2,185 +2,167 @@ import os
 import streamlit as st
 import pdfplumber
 import google.generativeai as genai
-from datetime import datetime
+from textwrap import wrap
 
-# =============================
+# ============================
 # CONFIG
-# =============================
+# ============================
 
-APP_PASSWORD = "swisscv"   # change later
+APP_PASSWORD = "swisscareer"   # change if you want
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    st.error("GEMINI_API_KEY not found in environment variables.")
+    st.error("GEMINI_API_KEY not found in environment variables")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Use stable public model
-model = genai.GenerativeModel("models/gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
+
+MAX_CHUNK_SIZE = 6000   # safe for Gemini
 
 
-# =============================
+# ============================
 # HELPERS
-# =============================
+# ============================
 
-def extract_pdf_text(uploaded_file):
+def extract_pdf_text(file):
     text = ""
-    with pdfplumber.open(uploaded_file) as pdf:
+    with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
+            if page.extract_text():
+                text += page.extract_text() + "\n"
+    return clean_text(text)
 
 
-def build_prompt(cv_text, jd_text=None):
+def clean_text(text):
+    return " ".join(text.replace("\n", " ").split())
 
-    base_prompt = f"""
-You are a Swiss Life Sciences recruitment expert and ATS optimisation specialist.
 
-Analyse the following CV in detail.
+def chunk_text(text, size=MAX_CHUNK_SIZE):
+    return wrap(text, size)
+
+
+def call_gemini(prompt):
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+
+# ============================
+# CORE ANALYSIS
+# ============================
+
+def run_analysis(cv_text, jd_text):
+
+    cv_chunks = chunk_text(cv_text)
+    jd_chunks = chunk_text(jd_text) if jd_text else []
+
+    cv_summary = ""
+    jd_summary = ""
+
+    # ---- Summarise CV ----
+    for chunk in cv_chunks:
+        prompt = f"""
+Summarise the following CV content clearly focusing on:
+- skills
+- experience
+- seniority
+- life sciences relevance
+- Swiss market readiness
+
+TEXT:
+{chunk}
+"""
+        cv_summary += call_gemini(prompt) + "\n"
+
+    # ---- Summarise JD ----
+    for chunk in jd_chunks:
+        prompt = f"""
+Summarise this job description focusing on:
+- required skills
+- keywords
+- seniority
+- expectations
+
+TEXT:
+{chunk}
+"""
+        jd_summary += call_gemini(prompt) + "\n"
+
+    # ---- Final Swiss style analysis ----
+
+    final_prompt = f"""
+You are a Swiss Life Sciences recruiter.
+
+Analyse this CV against Swiss hiring standards and the job description.
 
 Focus on:
-- Swiss market expectations
-- ATS searchability
-- Keyword density and relevance
-- Seniority positioning
-- Clear value proposition
-- Missing competencies
 
-Provide:
+1. Swiss CV structure issues
+2. Missing keywords
+3. Seniority mismatch
+4. Searchability (ATS + LinkedIn logic)
+5. Cultural fit for Switzerland
+6. Concrete improvement actions
 
-1. Overall CV quality score (0 to 100)
-2. Strengths
-3. Weaknesses
-4. Keyword gaps (expand deeply by skills, tools, domains, titles)
-5. Swiss market alignment feedback
-6. Concrete improvement suggestions
+CV SUMMARY:
+{cv_summary}
 
-CV:
-{cv_text}
+JOB DESCRIPTION SUMMARY:
+{jd_summary}
+
+Deliver in clear sections with bullet points.
+Be precise and professional.
 """
 
-    if jd_text:
-        base_prompt += f"""
-
-Additionally compare the CV to this Job Description.
-
-Identify:
-- Matching skills
-- Missing skills
-- Suggested profile positioning
-- Recommended keywords and job titles to improve discoverability
-
-Job Description:
-{jd_text}
-"""
-
-    return base_prompt
+    return call_gemini(final_prompt)
 
 
-def run_analysis(cv_text, jd_text=None):
+# ============================
+# STREAMLIT UI
+# ============================
 
-    if not cv_text.strip():
-        st.error("No CV text extracted.")
-        st.stop()
+st.set_page_config(page_title="Swiss CV Analyser", layout="centered")
 
-    prompt = build_prompt(cv_text, jd_text)
+st.title("Swiss CV & Job Fit Analyser")
 
-    response = model.generate_content(prompt)
+# ---- Password gate ----
 
-    return response.text
+password = st.text_input("Enter access password", type="password")
 
-
-# =============================
-# UI
-# =============================
-
-st.set_page_config(page_title="Swiss CV Analyser", layout="wide")
-
-st.title("🇨🇭 Swiss CV & Job Fit Analyser")
-
-# -----------------------------
-# Password Gate
-# -----------------------------
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-
-    pw = st.text_input("Enter password", type="password")
-
-    if st.button("Login"):
-        if pw == APP_PASSWORD:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Wrong password")
-
+if password != APP_PASSWORD:
     st.stop()
 
-# -----------------------------
-# Uploads
-# -----------------------------
+st.success("Access granted")
 
-st.subheader("Upload CV (PDF)")
+# ---- Uploads ----
 
-cv_file = st.file_uploader("Upload CV PDF", type=["pdf"])
+cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
+jd_file = st.file_uploader("Upload Job Description (optional PDF)", type=["pdf"])
 
-st.subheader("Optional: Upload Job Description")
+jd_text_manual = st.text_area("Or paste Job Description text (optional)")
 
-jd_file = st.file_uploader("Upload JD PDF (optional)", type=["pdf"])
-
-jd_text_manual = st.text_area("Or paste Job Description text here (optional)", height=150)
-
-# -----------------------------
-# Run
-# -----------------------------
-
-if st.button("Analyse CV"):
+if st.button("Run Analysis"):
 
     if not cv_file:
-        st.warning("Please upload a CV.")
+        st.warning("Please upload a CV PDF")
         st.stop()
 
-    with st.spinner("Extracting CV text..."):
+    with st.spinner("Reading CV..."):
         cv_text = extract_pdf_text(cv_file)
 
-    jd_text = ""
-
     if jd_file:
-        with st.spinner("Extracting JD text..."):
+        with st.spinner("Reading Job Description..."):
             jd_text = extract_pdf_text(jd_file)
+    else:
+        jd_text = clean_text(jd_text_manual)
 
-    elif jd_text_manual.strip():
-        jd_text = jd_text_manual
+    st.info(f"CV characters: {len(cv_text)}")
+    st.info(f"JD characters: {len(jd_text)}")
 
-    st.write(f"CV characters used: {len(cv_text)}")
-
-    if jd_text:
-        st.write(f"JD characters used: {len(jd_text)}")
-
-    with st.spinner("Running AI analysis..."):
+    with st.spinner("Analysing with Swiss market logic..."):
         result = run_analysis(cv_text, jd_text)
 
-    st.success("Analysis completed")
-
-    st.subheader("Results")
-
-    st.text_area("CV Analysis Output", result, height=600)
-
-    # Optional save
-
-    if st.button("Save Analysis to File"):
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"Swiss_CV_Analysis_{timestamp}.txt"
-
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(result)
-
-        st.success(f"Saved as {filename}")
+    st.subheader("Swiss CV Analysis Result")
+    st.write(result)

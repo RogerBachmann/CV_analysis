@@ -18,7 +18,9 @@ if not GEMINI_API_KEY:
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+
+# safer stable model
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # ============================
 # HELPERS
@@ -28,27 +30,34 @@ def extract_pdf_text(uploaded_file):
     text = ""
     with pdfplumber.open(BytesIO(uploaded_file.read())) as pdf:
         for page in pdf.pages:
-            if page.extract_text():
-                text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
     return text
+
+
+def trim_text(text, max_chars=12000):
+    return text[:max_chars]
 
 
 def build_prompt(cv_text, jd_text=None):
 
-    base_prompt = f"""
-You are a Swiss Life Sciences recruitment expert.
+    prompt = f"""
+You are a senior Swiss Life Sciences recruiter and career strategist.
 
-Analyse this CV strictly against Swiss market standards.
+Analyse the following CV strictly according to Swiss industry hiring standards.
 
 Focus on:
-- structure and formatting
-- industry readiness
-- keyword optimisation for recruiter search
-- seniority positioning
-- quantified impact
-- academic vs industry language
-- risks of overqualification
-- clarity of role scope
+
+- Structure and formatting quality
+- Industry readiness vs academic style
+- Seniority positioning
+- Searchability and recruiter keyword optimisation
+- Quantification of impact
+- Role scope clarity
+- Swiss market expectations
+- Overqualification risks
+- Concrete improvement recommendations
 
 Return a structured professional report with:
 
@@ -57,7 +66,8 @@ Return a structured professional report with:
 3. Content Quality
 4. Keyword & Searchability
 5. Swiss Market Fit
-6. Concrete Improvement Actions
+6. Main Risks
+7. Concrete Actionable Improvements
 
 CV CONTENT:
 ----------------
@@ -65,22 +75,35 @@ CV CONTENT:
 """
 
     if jd_text:
-        base_prompt += f"""
+        prompt += f"""
 
 JOB DESCRIPTION:
 ----------------
 {jd_text}
 
-Also include:
-- Match analysis
+Additionally include:
+
+- Role match analysis
 - Missing keywords
-- Suggested job title optimisation
+- Suggested job title optimisation for LinkedIn and ATS
 """
 
-    return base_prompt
+    return prompt
 
 
 def run_analysis(cv_text, jd_text=None):
+
+    if not cv_text.strip():
+        st.error("CV text extraction failed. PDF may be scanned.")
+        st.stop()
+
+    cv_text = trim_text(cv_text)
+
+    if jd_text:
+        if not jd_text.strip():
+            st.error("Job description extraction failed.")
+            st.stop()
+        jd_text = trim_text(jd_text)
 
     prompt = build_prompt(cv_text, jd_text)
 
@@ -117,13 +140,15 @@ if password != APP_PASSWORD:
 
 st.success("Access granted")
 
-# ---- Uploads ----
+# ---- Upload CV ----
 
 st.subheader("Upload CV (PDF)")
 
 cv_file = st.file_uploader("CV PDF", type=["pdf"])
 
-st.subheader("Optional: Upload Job Description (PDF)")
+# ---- Upload Job Description ----
+
+st.subheader("Optional. Upload Job Description (PDF)")
 
 jd_file = st.file_uploader("Job Description PDF", type=["pdf"])
 
@@ -169,4 +194,3 @@ if st.button("Run Swiss Market Analysis"):
             file_name=filename,
             mime="text/plain"
         )
-

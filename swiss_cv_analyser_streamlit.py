@@ -1,179 +1,172 @@
 import os
+import streamlit as st
 import pdfplumber
 import google.generativeai as genai
 from datetime import datetime
-import re
-from collections import Counter
+from io import BytesIO
 
-# -------------------------
-# API
-# -------------------------
+# ============================
+# CONFIG
+# ============================
+
+APP_PASSWORD = "swisscareer"   # change later
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not found in environment variables")
+    st.error("GEMINI_API_KEY not found in environment variables")
+    st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
-# -------------------------
-# PDF TEXT EXTRACTION
-# -------------------------
+# ============================
+# HELPERS
+# ============================
 
-def extract_text(pdf_path):
+def extract_pdf_text(uploaded_file):
     text = ""
-    with pdfplumber.open(pdf_path) as pdf:
+    with pdfplumber.open(BytesIO(uploaded_file.read())) as pdf:
         for page in pdf.pages:
             if page.extract_text():
                 text += page.extract_text() + "\n"
     return text
 
-# -------------------------
-# SWISS CV KEYWORD LAYERS
-# -------------------------
 
-CORE_TERMS = [
-    "gmp","gcp","glp","quality assurance","regulatory affairs",
-    "clinical operations","medical affairs","manufacturing",
-    "validation","process improvement","compliance","audits"
-]
+def build_prompt(cv_text, jd_text=None):
 
-SENIORITY_TERMS = [
-    "director","head","senior","lead","principal","global",
-    "strategic","budget responsibility","people management",
-    "stakeholder management","cross functional"
-]
+    base_prompt = f"""
+You are a Swiss Life Sciences recruitment expert.
 
-DIGITAL_TERMS = [
-    "sap","automation","digital transformation","data driven",
-    "process optimisation","lean","six sigma","agile"
-]
-
-RESULT_TERMS = [
-    "increased","reduced","optimised","delivered","achieved",
-    "improved","launched","implemented","led"
-]
-
-ALL_STATIC_KEYWORDS = CORE_TERMS + SENIORITY_TERMS + DIGITAL_TERMS + RESULT_TERMS
-
-# -------------------------
-# JOB DESCRIPTION KEYWORDS
-# -------------------------
-
-def extract_jd_keywords(text, top_n=50):
-    words = re.findall(r"[a-zA-Z]{3,}", text.lower())
-    freq = Counter(words)
-    common = [w for w,_ in freq.most_common(top_n)]
-    return common
-
-# -------------------------
-# KEYWORD ANALYSIS
-# -------------------------
-
-def keyword_analysis(cv_text, keywords):
-    found = []
-    missing = []
-
-    lower = cv_text.lower()
-
-    for k in keywords:
-        if k in lower:
-            found.append(k)
-        else:
-            missing.append(k)
-
-    return found, missing
-
-# -------------------------
-# AI RECRUITER ANALYSIS
-# -------------------------
-
-def ai_cv_review(cv_text, jd_text=None):
-
-    jd_section = f"\nTARGET ROLE DESCRIPTION:\n{jd_text}\n" if jd_text else ""
-
-    prompt = f"""
-You are a senior Swiss Life Sciences recruiter.
-
-Analyse this CV according to Swiss pharma hiring standards.
+Analyse this CV strictly against Swiss market standards.
 
 Focus on:
+- structure and formatting
+- industry readiness
+- keyword optimisation for recruiter search
+- seniority positioning
+- quantified impact
+- academic vs industry language
+- risks of overqualification
+- clarity of role scope
 
-1. ATS searchability
-2. Keyword strength
-3. Seniority clarity
-4. Impact vs task listing
-5. Leadership signalling
-6. Market positioning for Switzerland
-7. Alignment to target role if provided
+Return a structured professional report with:
 
-Give:
+1. Executive Summary
+2. Structure & Formatting
+3. Content Quality
+4. Keyword & Searchability
+5. Swiss Market Fit
+6. Concrete Improvement Actions
 
-- Clear strengths
-- Critical weaknesses
-- Missing strategic elements
-- Concrete improvement actions
-
-CV:
+CV CONTENT:
+----------------
 {cv_text}
-
-{jd_section}
 """
 
+    if jd_text:
+        base_prompt += f"""
+
+JOB DESCRIPTION:
+----------------
+{jd_text}
+
+Also include:
+- Match analysis
+- Missing keywords
+- Suggested job title optimisation
+"""
+
+    return base_prompt
+
+
+def run_analysis(cv_text, jd_text=None):
+
+    prompt = build_prompt(cv_text, jd_text)
+
     response = model.generate_content(prompt)
+
     return response.text
 
-# -------------------------
-# MAIN
-# -------------------------
 
-def run_analysis():
+def save_report(text):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"Swiss_CV_Analysis_{timestamp}.txt"
 
-    cv_file = input("Enter CV PDF filename: ").strip()
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(text)
 
-    if not os.path.exists(cv_file):
-        print("CV file not found")
-        return
+    return filename
 
-    jd_file = input("Enter Job Description PDF (or press Enter to skip): ").strip()
 
-    cv_text = extract_text(cv_file)
+# ============================
+# STREAMLIT UI
+# ============================
+
+st.set_page_config(page_title="Swiss CV Analyser", layout="centered")
+
+st.title("Swiss CV & Market Fit Analyser")
+
+# ---- Password Gate ----
+
+password = st.text_input("Enter access password", type="password")
+
+if password != APP_PASSWORD:
+    st.warning("Access restricted")
+    st.stop()
+
+st.success("Access granted")
+
+# ---- Uploads ----
+
+st.subheader("Upload CV (PDF)")
+
+cv_file = st.file_uploader("CV PDF", type=["pdf"])
+
+st.subheader("Optional: Upload Job Description (PDF)")
+
+jd_file = st.file_uploader("Job Description PDF", type=["pdf"])
+
+st.subheader("Or paste Job Description text")
+
+jd_text_manual = st.text_area("Job Description text", height=150)
+
+# ---- Analyse Button ----
+
+if st.button("Run Swiss Market Analysis"):
+
+    if not cv_file:
+        st.error("Please upload a CV PDF")
+        st.stop()
+
+    with st.spinner("Extracting CV..."):
+        cv_text = extract_pdf_text(cv_file)
 
     jd_text = None
-    keywords = ALL_STATIC_KEYWORDS.copy()
 
     if jd_file:
-        if os.path.exists(jd_file):
-            jd_text = extract_text(jd_file)
-            jd_keywords = extract_jd_keywords(jd_text)
-            keywords.extend(jd_keywords)
-        else:
-            print("JD file not found. Continuing without JD.")
+        with st.spinner("Extracting Job Description..."):
+            jd_text = extract_pdf_text(jd_file)
 
-    found, missing = keyword_analysis(cv_text, keywords)
+    elif jd_text_manual.strip():
+        jd_text = jd_text_manual
 
-    ai_feedback = ai_cv_review(cv_text, jd_text)
+    with st.spinner("Running AI analysis..."):
+        result = run_analysis(cv_text, jd_text)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"Swiss_CV_Analysis_{timestamp}.txt"
+    filename = save_report(result)
 
-    with open(output_file, "w", encoding="utf-8") as f:
+    st.success("Analysis completed")
 
-        f.write("SWISS CV ANALYSIS\n\n")
+    st.subheader("Preview")
 
-        f.write("KEYWORDS FOUND:\n")
-        f.write(", ".join(found[:80]) + "\n\n")
+    st.text_area("Analysis Report", result, height=400)
 
-        f.write("KEYWORDS MISSING:\n")
-        f.write(", ".join(missing[:80]) + "\n\n")
+    with open(filename, "rb") as f:
+        st.download_button(
+            label="Download Report (.txt)",
+            data=f,
+            file_name=filename,
+            mime="text/plain"
+        )
 
-        f.write("RECRUITER REVIEW:\n\n")
-        f.write(ai_feedback)
-
-    print(f"Analysis saved as {output_file}")
-
-# -------------------------
-
-if __name__ == "__main__":
-    run_analysis()

@@ -4,6 +4,7 @@ import google.generativeai as genai
 from textwrap import wrap
 import re
 import io
+import time
 from docxtpl import DocxTemplate
 
 # --- Page Configuration ---
@@ -20,7 +21,8 @@ except KeyError as e:
 
 @st.cache_resource
 def get_best_model():
-    MODEL_PRIORITY = ["gemini-3-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    """Prioritizes 1.5-Flash to avoid the strict 2.0-Flash rate limits."""
+    MODEL_PRIORITY = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"]
     try:
         available_models = [m.name.split('/')[-1] for m in genai.list_models() 
                            if 'generateContent' in m.supported_generation_methods]
@@ -52,25 +54,31 @@ def extract_pdf_text(file):
         return ""
 
 def call_gemini(prompt):
+    """Calls Gemini with 3 retry attempts to handle 429 Quota errors."""
     if not prompt.strip(): return ""
-    try:
-        response = model_instance.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        return f"\n[Model Error: {str(e)}]\n"
+    for attempt in range(3):
+        try:
+            response = model_instance.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            if "429" in str(e):
+                time.sleep(6)  # Wait 6 seconds for quota to refresh
+                continue
+            return f"\n[Model Error: {str(e)}]\n"
+    return "Error: Maximum retries reached due to API rate limits. Please wait a moment and try again."
 
 def create_word_report(report_text):
     try:
         doc = DocxTemplate("template.docx")
         
-        # Metadata Extraction for Branding
+        # Metadata Extraction (Matches the AI's hidden tags)
         name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
         
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # Clean the AI text for the Word body (removes the hidden metadata tags)
+        # Clean report text for the Word body
         clean_report = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_report = re.sub(r"CATEGORY:.*?\n", "", clean_report).strip()
 
@@ -88,12 +96,12 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Word Template Error: {e}. Ensure 'template.docx' is uploaded.")
+        st.error(f"Word Template Error: {e}. Make sure 'template.docx' is in your GitHub folder.")
         return None
 
 def run_analysis(cv_text, jd_text):
-    cv_chunks = wrap(cv_text, 10000)
-    jd_chunks = wrap(jd_text, 10000) if jd_text else []
+    cv_chunks = wrap(cv_text, 8000) # Slightly smaller chunks for token safety
+    jd_chunks = wrap(jd_text, 8000) if jd_text else []
     cv_summary, jd_summary = "", ""
 
     progress = st.progress(0, text="Swiss Recruiter AI is processing...")
@@ -101,12 +109,13 @@ def run_analysis(cv_text, jd_text):
     for i, chunk in enumerate(cv_chunks):
         cv_summary += call_gemini(f"Extract key career facts, technical skills, and achievements: {chunk}") + "\n"
         progress.progress((i + 0.5) / (len(cv_chunks) + max(len(jd_chunks), 1)))
+        time.sleep(1) # Small delay to respect RPM
 
     for i, chunk in enumerate(jd_chunks):
         jd_summary += call_gemini(f"Extract core requirements and KPIs: {chunk}") + "\n"
         progress.progress((len(cv_chunks) + i + 1) / (len(cv_chunks) + len(jd_chunks)))
+        time.sleep(1)
 
-    # FINAL PROMPT with your original structure + new Metadata requirements
     final_prompt = f"""
     You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the JD.
     
@@ -115,7 +124,7 @@ def run_analysis(cv_text, jd_text):
     CATEGORY: [READY, IMPROVE, or MAJOR] 
     (READY if score > 85, IMPROVE if 60-85, MAJOR if < 60)
 
-    STRUCTURE:
+    REPORT STRUCTURE:
     ## 1. CV PERFORMANCE SCORECARD
     **OVERALL JOB-FIT SCORE: [Score]/100**
 
@@ -158,6 +167,7 @@ if pass_input != APP_PASSWORD:
     st.stop()
 
 st.sidebar.success("✅ Authenticated")
+st.sidebar.caption(f"Using Model: {model_instance.model_name}")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -173,7 +183,7 @@ if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Analyzing..."):
+        with st.spinner("Analyzing (this may take 30-60 seconds due to API limits)..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else clean_text(jd_manual)
             
@@ -181,15 +191,18 @@ if st.button("🚀 Run Analysis"):
                 st.error("Text extraction failed.")
             else:
                 report = run_analysis(cv_raw, jd_raw)
+                
+                # Show results in Streamlit
                 st.divider()
                 st.subheader("Professional CV Audit Report")
                 st.markdown(report)
                 
+                # Generate and offer Word download
                 word_file = create_word_report(report)
                 if word_file:
                     st.download_button(
                         label="📩 Download Branded Word Report",
                         data=word_file,
-                        file_name="Swiss_CV_Audit.docx",
+                        file_name="Swiss_CV_Audit_Report.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )

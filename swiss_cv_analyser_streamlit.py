@@ -21,17 +21,24 @@ except KeyError as e:
 
 @st.cache_resource
 def get_best_model():
-    """Prioritizes 1.5-Flash to avoid the strict 2.0-Flash rate limits."""
-    MODEL_PRIORITY = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"]
+    """Dynamically finds available models to prevent 404 errors."""
     try:
-        available_models = [m.name.split('/')[-1] for m in genai.list_models() 
-                           if 'generateContent' in m.supported_generation_methods]
-        for model_name in MODEL_PRIORITY:
-            if model_name in available_models:
-                return genai.GenerativeModel(model_name)
-        return genai.GenerativeModel("gemini-1.5-flash")
+        available_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        # Priority: 1.5 Flash is best for Free Tier limits
+        priority = [
+            "models/gemini-1.5-flash", 
+            "models/gemini-1.5-flash-latest", 
+            "models/gemini-pro"
+        ]
+        for p in priority:
+            if p in available_models:
+                return genai.GenerativeModel(p)
+        return genai.GenerativeModel(available_models[0])
     except Exception:
-        return genai.GenerativeModel("gemini-1.5-flash")
+        return genai.GenerativeModel("models/gemini-1.5-flash")
 
 model_instance = get_best_model()
 
@@ -54,24 +61,26 @@ def extract_pdf_text(file):
         return ""
 
 def call_gemini(prompt):
-    """Calls Gemini with 3 retry attempts to handle 429 Quota errors."""
+    """Calls Gemini with 3 retries and 8-second delay for 429 errors."""
     if not prompt.strip(): return ""
     for attempt in range(3):
         try:
             response = model_instance.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            if "429" in str(e):
-                time.sleep(6)  # Wait 6 seconds for quota to refresh
+            err_msg = str(e)
+            if "429" in err_msg:
+                time.sleep(8)
                 continue
-            return f"\n[Model Error: {str(e)}]\n"
-    return "Error: Maximum retries reached due to API rate limits. Please wait a moment and try again."
+            return f"\n[Model Error: {err_msg}]\n"
+    return "Error: API Rate Limit reached. Please wait 10 seconds and try again."
 
 def create_word_report(report_text):
+    """Injects AI data into the branded template.docx."""
     try:
         doc = DocxTemplate("template.docx")
         
-        # Metadata Extraction (Matches the AI's hidden tags)
+        # Metadata Extraction
         name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
         
@@ -96,11 +105,12 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Word Template Error: {e}. Make sure 'template.docx' is in your GitHub folder.")
+        st.error(f"Word Template Error: {e}. Check if template.docx is in your repo.")
         return None
 
 def run_analysis(cv_text, jd_text):
-    cv_chunks = wrap(cv_text, 8000) # Slightly smaller chunks for token safety
+    """Main analysis logic with chunking and Swiss-specific prompts."""
+    cv_chunks = wrap(cv_text, 8000)
     jd_chunks = wrap(jd_text, 8000) if jd_text else []
     cv_summary, jd_summary = "", ""
 
@@ -109,7 +119,7 @@ def run_analysis(cv_text, jd_text):
     for i, chunk in enumerate(cv_chunks):
         cv_summary += call_gemini(f"Extract key career facts, technical skills, and achievements: {chunk}") + "\n"
         progress.progress((i + 0.5) / (len(cv_chunks) + max(len(jd_chunks), 1)))
-        time.sleep(1) # Small delay to respect RPM
+        time.sleep(1)
 
     for i, chunk in enumerate(jd_chunks):
         jd_summary += call_gemini(f"Extract core requirements and KPIs: {chunk}") + "\n"
@@ -119,12 +129,12 @@ def run_analysis(cv_text, jd_text):
     final_prompt = f"""
     You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the JD.
     
-    CRITICAL METADATA FOR DOCUMENT:
-    NAME_START: [Full Name of Candidate] NAME_END
+    CRITICAL METADATA:
+    NAME_START: [Candidate Full Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR] 
     (READY if score > 85, IMPROVE if 60-85, MAJOR if < 60)
 
-    REPORT STRUCTURE:
+    STRUCTURE:
     ## 1. CV PERFORMANCE SCORECARD
     **OVERALL JOB-FIT SCORE: [Score]/100**
 
@@ -167,7 +177,7 @@ if pass_input != APP_PASSWORD:
     st.stop()
 
 st.sidebar.success("✅ Authenticated")
-st.sidebar.caption(f"Using Model: {model_instance.model_name}")
+st.sidebar.caption(f"Active Model: {model_instance.model_name}")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -183,7 +193,7 @@ if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Analyzing (this may take 30-60 seconds due to API limits)..."):
+        with st.spinner("Analyzing..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else clean_text(jd_manual)
             
@@ -191,13 +201,10 @@ if st.button("🚀 Run Analysis"):
                 st.error("Text extraction failed.")
             else:
                 report = run_analysis(cv_raw, jd_raw)
-                
-                # Show results in Streamlit
                 st.divider()
                 st.subheader("Professional CV Audit Report")
                 st.markdown(report)
                 
-                # Generate and offer Word download
                 word_file = create_word_report(report)
                 if word_file:
                     st.download_button(

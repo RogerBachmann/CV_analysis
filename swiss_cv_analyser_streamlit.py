@@ -21,14 +21,27 @@ except KeyError as e:
 
 @st.cache_resource
 def get_best_model():
+    """Updated discovery logic to fix 404 errors by finding the exact model string."""
     try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        priority = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-pro"]
-        for p in priority:
-            if p in available_models: return genai.GenerativeModel(p)
-        return genai.GenerativeModel("models/gemini-1.5-flash")
-    except Exception:
-        return genai.GenerativeModel("models/gemini-1.5-flash")
+        # Get all models that support 'generateContent'
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # We prioritize 'flash-latest' as it is the most stable endpoint for v1beta
+        priority_list = [
+            "models/gemini-1.5-flash-latest",
+            "models/gemini-1.5-flash",
+            "models/gemini-pro"
+        ]
+        
+        for model_path in priority_list:
+            if model_path in models:
+                return genai.GenerativeModel(model_path)
+        
+        # If none of the priority list is found, use the first available model
+        return genai.GenerativeModel(models[0])
+    except Exception as e:
+        # Hard fallback to standard string if listing fails
+        return genai.GenerativeModel("gemini-1.5-flash")
 
 model_instance = get_best_model()
 
@@ -42,7 +55,9 @@ def extract_pdf_text(file):
     if file is None: return ""
     text = ""
     try:
-        with pdfplumber.open(io.BytesIO(file.read())) as pdf:
+        # Create a fresh bytes stream from the file
+        file_bytes = file.read()
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
                 content = page.extract_text()
                 if content: text += content + " "
@@ -58,13 +73,13 @@ def call_gemini(prompt):
             response = model_instance.generate_content(prompt)
             if hasattr(response, 'text') and response.text:
                 return response.text.strip()
-            return "AI Error: Safety filters blocked the response."
+            return "AI Error: Response was empty or blocked by safety filters."
         except Exception as e:
             if "429" in str(e):
                 time.sleep(10)
                 continue
             return f"AI Error: {str(e)}"
-    return "AI Error: Failed after retries."
+    return "AI Error: Failed after 3 retries."
 
 def create_word_report(report_text):
     try:
@@ -114,9 +129,7 @@ def create_word_report(report_text):
 def run_analysis(cv_text, jd_text):
     prompt = f"""
     You are a Senior Swiss Life Sciences Recruiter. Evaluate the CV against the JD. 
-    Maintain high consistency in scoring.
-    
-    SCORING RUBRIC:
+    Maintain high consistency in scoring by using the following rubric:
     - Technical (40%), Seniority (20%), Swiss Compliance (20%), Impact/KPIs (20%)
 
     REQUIRED METADATA:
@@ -129,19 +142,19 @@ def run_analysis(cv_text, jd_text):
 
     ### 1. CV PERFORMANCE SCORECARD
     Overall Job-Fit Score: [Score]/100
-    Breakdown: [Brief explanation]
+    Breakdown: [Brief explanation of score per category]
 
     ### 2. SWISS COMPLIANCE & FORMATTING
     The Fact: Swiss standards require clear Permit/Language levels.
     Audit: [Review]
 
     ### 3. TECHNICAL & KEYWORD ALIGNMENT
-    The Fact: Keywords are essential for ATS screening.
+    The Fact: Keywords are essential for passing Swiss ATS screening.
     Audit: [Comparison]
 
     ### 4. PRIORITY ACTION PLAN
-    1. [Task]
-    2. [Task]
+    1. [Action 1]
+    2. [Action 2]
 
     CV DATA: {cv_text[:7000]}
     JD DATA: {jd_text[:3000] if jd_text else "General Swiss Life Sciences Industry Standard"}
@@ -174,11 +187,12 @@ if st.button("🚀 Run Analysis"):
         st.warning("Please upload a CV.")
     else:
         with st.spinner("AI is analyzing... please wait."):
-            # Extract texts
+            # Re-read to ensure buffer is at start
+            cv_file.seek(0)
             cv_raw = extract_pdf_text(cv_file)
             
-            # Use JD from file if uploaded, otherwise use text area
             if jd_file:
+                jd_file.seek(0)
                 jd_raw = extract_pdf_text(jd_file)
             else:
                 jd_raw = clean_text(jd_manual)

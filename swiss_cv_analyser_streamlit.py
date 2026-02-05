@@ -77,24 +77,25 @@ def create_word_report(report_text):
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
         clean_body = clean_body.replace("**", "").strip()
 
-        # 3. Build RichText for Word (Strict Formatting)
-        # Note: Size is in half-points for some libraries, but docxtpl uses Pt.
+        # 3. Build RichText for Word
+        # We use size=24 because docxtpl often uses half-points (24 = 12pt)
         rt = RichText()
         lines = clean_body.split('\n')
         
         for line in lines:
             line = line.strip()
             if not line:
-                rt.add('\n', font='Calibri', size=12)
+                rt.add('\n')
                 continue
             
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
-                # Subheader: Navy (1D457C), 14pt
-                rt.add('\n' + display_text + '\n', font='Calibri', size=14, color='1D457C', bold=False)
+                # Subheader: Navy (1D457C), 14pt (Size 28)
+                rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C')
             else:
-                # Body Text: Light Grey (E7E6E6), 12pt
-                rt.add(line + '\n', font='Calibri', size=12, color='E7E6E6', bold=False)
+                # Body Text: Light Grey (E7E6E6), 12pt (Size 24)
+                # Ensure we add the line break explicitly
+                rt.add(line + '\n', font='Calibri', size=24, color='E7E6E6')
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),

@@ -1,5 +1,5 @@
 streamlit
-google-generativeai
 pdfplumber
+google-generativeai
+docxtpl
 python-docx
-

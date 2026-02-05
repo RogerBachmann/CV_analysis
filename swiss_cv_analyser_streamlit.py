@@ -15,42 +15,24 @@ try:
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
     genai.configure(api_key=GEMINI_API_KEY)
 except KeyError as e:
-    st.error(f"Error: Secret {e} not found.")
+    st.error(f"Error: Secret {e} not found in Streamlit Secrets.")
     st.stop()
 
-# --- Bulletproof Model Discovery ---
+# --- Model Setup ---
+# Using the most reliable model string for the current Google AI SDK
 @st.cache_resource
-def get_working_model():
-    """Tries multiple naming conventions to bypass the 404 error."""
-    # List of possible strings for the same model
-    model_names = [
-        "gemini-1.5-flash-latest", 
-        "gemini-1.5-flash", 
-        "models/gemini-1.5-flash-latest",
-        "models/gemini-1.5-flash"
-    ]
-    
-    # Relaxed safety settings to prevent silent failures
-    safety = [
+def get_model():
+    # We use 'gemini-1.5-flash' - adding the prefix 'models/' can sometimes cause the 404
+    # Safety settings set to BLOCK_NONE to prevent silent errors during analysis
+    safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
+    return genai.GenerativeModel(model_name="gemini-1.5-flash", safety_settings=safety_settings)
 
-    for name in model_names:
-        try:
-            model = genai.GenerativeModel(model_name=name, safety_settings=safety)
-            # Test the model with a tiny call to see if it actually exists (avoids 404 later)
-            model.generate_content("test") 
-            return model
-        except Exception:
-            continue
-            
-    st.error("Could not connect to any Gemini models. Please check your API key permissions.")
-    st.stop()
-
-model_instance = get_working_model()
+model_instance = get_model()
 
 # --- Helper Functions ---
 def clean_text(text):
@@ -69,7 +51,7 @@ def extract_pdf_text(file):
                 if content: text += content + " "
         return clean_text(text)
     except Exception as e:
-        st.error(f"PDF Error: {e}")
+        st.error(f"PDF Extraction Error: {e}")
         return ""
 
 def call_gemini(prompt):
@@ -79,29 +61,33 @@ def call_gemini(prompt):
             response = model_instance.generate_content(prompt)
             if response and response.text:
                 return response.text.strip()
-            return "AI Error: Safety Filter triggered or empty response."
+            return "AI Error: The AI returned an empty response. Check safety filters."
         except Exception as e:
-            if "429" in str(e):
-                time.sleep(12)
+            err_msg = str(e)
+            if "429" in err_msg:
+                time.sleep(10)
                 continue
-            return f"AI Error: {str(e)}"
-    return "AI Error: Failed after retries."
+            # Return the specific error to the UI so we can see what's happening
+            return f"AI Error: {err_msg}"
+    return "AI Error: Failed after 3 retries."
 
 def create_word_report(report_text):
     try:
         doc = DocxTemplate("template.docx")
         
+        # 1. Metadata Extraction
         name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
         
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # Content Cleaning (No Bold)
+        # 2. Body Cleaning (Stripping Bold markdown)
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
         clean_body = clean_body.replace("**", "").replace("__", "").strip()
 
+        # 3. RichText Formatting
         rt = RichText()
         lines = clean_body.split('\n')
         for line in lines:
@@ -112,10 +98,10 @@ def create_word_report(report_text):
             
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
-                # Subheader: Navy, 14pt
+                # Subheader: Navy (1D457C), 14pt (Size 28)
                 rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C', bold=True)
             else:
-                # Body: Black, 12pt, NO BOLD
+                # Body Text: Black (000000), 12pt (Size 24), EXPLICITLY NOT BOLD
                 rt.add(line + '\n', font='Calibri', size=24, color='000000', bold=False)
 
         context = {
@@ -132,69 +118,94 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Word Doc Error: {e}")
+        st.error(f"Formatting Error: {e}")
         return None
 
 def run_analysis(cv_text, jd_text):
-    # Shortened snips to prevent "Complexity" errors
+    # Prompt is designed for high consistency and reproducibility
     prompt = f"""
     You are a Senior Swiss Recruiter. Evaluate the CV against the JD. 
-    Maintain a consistent, clinical score based on: Technical (40%), Seniority (20%), Swiss Compliance (20%), KPIs (20%).
+    Use a clinical, consistent approach for scoring: 
+    Technical (40%), Seniority (20%), Swiss Compliance (20%), Impact/KPIs (20%).
 
-    NAME_START: [Candidate Name] NAME_END
+    NAME_START: [Full Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR]
 
-    INSTRUCTIONS: NO bold markdown (**). Use '###' for headers.
+    INSTRUCTIONS: 
+    - NO bold markdown (** or __). 
+    - Use '###' for section headers.
+    - Be concise and professional.
 
     ### 1. CV PERFORMANCE SCORECARD
     Overall Job-Fit Score: [Score]/100
-    Breakdown: [Short Explanation]
+    Breakdown: [Briefly explain the math per category]
 
     ### 2. SWISS COMPLIANCE & FORMATTING
-    The Fact: Swiss standards require clear Permit and Language levels.
-    Audit: [Analysis]
+    The Fact: Swiss recruitment standards expect clear details on Nationality/Permit and Languages.
+    Audit: [Compare against Swiss standard]
 
     ### 3. TECHNICAL & KEYWORD ALIGNMENT
-    The Fact: Keywords are essential for Swiss ATS systems.
-    Audit: [Review]
+    The Fact: Keywords are essential for passing automated ATS screenings in Life Sciences.
+    Audit: [Skill match/gap analysis]
 
     ### 4. PRIORITY ACTION PLAN
-    1. [Task]
-    2. [Task]
+    1. [Strategic Action]
+    2. [High-Impact Task]
 
-    CV: {cv_text[:6000]}
-    JD: {jd_text[:3000] if jd_text else "General Swiss Life Sciences"}
+    CV DATA: {cv_text[:6500]}
+    JD DATA: {jd_text[:3000] if jd_text else "General Swiss Life Sciences Industry Standard"}
     """
     return call_gemini(prompt)
 
 # --- UI Interface ---
 st.title("🇨🇭 Swiss CV & Job Fit Analyser")
 
-pass_input = st.sidebar.text_input("Password", type="password")
+pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
 if pass_input != APP_PASSWORD:
-    st.info("Enter password to start.")
+    if pass_input: st.sidebar.error("Incorrect Password")
+    st.info("Authenticate in the sidebar to begin.")
     st.stop()
+
+st.sidebar.success("✅ Authenticated")
 
 col1, col2 = st.columns(2)
 with col1:
-    cv_f = st.file_uploader("Upload CV", type=["pdf"])
+    st.subheader("1. Upload CV")
+    cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"], key="cv_up")
+
 with col2:
-    jd_f = st.file_uploader("Upload JD", type=["pdf"])
-    jd_m = st.text_area("Or paste JD", height=100)
+    st.subheader("2. Target Job")
+    jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"], key="jd_up")
+    jd_manual = st.text_area("Or paste JD text manually", height=100)
 
 if st.button("🚀 Run Analysis"):
-    if cv_f:
-        with st.spinner("Connecting to model and analysing..."):
-            cv_txt = extract_pdf_text(cv_f)
-            jd_txt = extract_pdf_text(jd_f) if jd_f else clean_text(jd_m)
+    if not cv_file:
+        st.warning("Please upload a CV.")
+    else:
+        with st.spinner("Analyzing..."):
+            cv_raw = extract_pdf_text(cv_file)
             
-            report = run_analysis(cv_txt, jd_txt)
-            
-            if "AI Error" not in report:
-                st.divider()
-                st.markdown(report)
-                w_file = create_word_report(report)
-                if w_file:
-                    st.download_button("📩 Download Audit", w_file, "Swiss_Audit.docx")
+            if jd_file:
+                jd_raw = extract_pdf_text(jd_file)
             else:
-                st.error(report)
+                jd_raw = clean_text(jd_manual)
+            
+            if not cv_raw:
+                st.error("Text extraction failed.")
+            else:
+                report = run_analysis(cv_raw, jd_raw)
+                
+                if "AI Error" not in report:
+                    st.divider()
+                    st.markdown(report)
+                    
+                    word_file = create_word_report(report)
+                    if word_file:
+                        st.download_button(
+                            label="📩 Download Branded Word Report",
+                            data=word_file,
+                            file_name="Swiss_CV_Audit.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        )
+                else:
+                    st.error(report)

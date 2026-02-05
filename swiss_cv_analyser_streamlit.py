@@ -72,13 +72,12 @@ def create_word_report(report_text):
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # 2. Body Cleaning
+        # 2. Body Cleaning: Remove all Markdown bolding for a clean look
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
         clean_body = clean_body.replace("**", "").strip()
 
         # 3. Build RichText for Word
-        # We use size=24 because docxtpl often uses half-points (24 = 12pt)
         rt = RichText()
         lines = clean_body.split('\n')
         
@@ -91,11 +90,10 @@ def create_word_report(report_text):
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
                 # Subheader: Navy (1D457C), 14pt (Size 28)
-                rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C')
+                rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C', bold=True)
             else:
-                # Body Text: Light Grey (E7E6E6), 12pt (Size 24)
-                # Ensure we add the line break explicitly
-                rt.add(line + '\n', font='Calibri', size=24, color='E7E6E6')
+                # Body Text: Pure Black (000000), 12pt (Size 24), No Bold
+                rt.add(line + '\n', font='Calibri', size=24, color='000000', bold=False)
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),
@@ -170,7 +168,7 @@ if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Analyzing..."):
+        with st.spinner("Generating Audit..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             

@@ -5,37 +5,29 @@ from textwrap import wrap
 import re
 import io
 import time
-from docxtpl import DocxTemplate
+from docxtpl import DocxTemplate, RichText
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨🇭", layout="wide")
 
 # --- API & Password Setup ---
 try:
+    # Ensure these are set in your Streamlit Cloud Secrets
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
     genai.configure(api_key=GEMINI_API_KEY)
 except KeyError as e:
-    st.error(f"Error: Secret {e} not found in Streamlit Secrets.")
+    st.error(f"Error: Secret {e} not found. Please add GEMINI_API_KEY and APP_PASSWORD to Secrets.")
     st.stop()
 
 @st.cache_resource
 def get_best_model():
-    """Dynamically finds available models to prevent 404 errors."""
+    """Finds available models and uses 1.5-Flash for better stability on Free Tier."""
     try:
-        available_models = [
-            m.name for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        # Priority: 1.5 Flash is best for Free Tier limits
-        priority = [
-            "models/gemini-1.5-flash", 
-            "models/gemini-1.5-flash-latest", 
-            "models/gemini-pro"
-        ]
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        priority = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-pro"]
         for p in priority:
-            if p in available_models:
-                return genai.GenerativeModel(p)
+            if p in available_models: return genai.GenerativeModel(p)
         return genai.GenerativeModel(available_models[0])
     except Exception:
         return genai.GenerativeModel("models/gemini-1.5-flash")
@@ -61,39 +53,65 @@ def extract_pdf_text(file):
         return ""
 
 def call_gemini(prompt):
-    """Calls Gemini with 3 retries and 8-second delay for 429 errors."""
+    """Handles API calls with automatic retries for Quota (429) errors."""
     if not prompt.strip(): return ""
     for attempt in range(3):
         try:
             response = model_instance.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg:
+            if "429" in str(e):
                 time.sleep(8)
                 continue
-            return f"\n[Model Error: {err_msg}]\n"
-    return "Error: API Rate Limit reached. Please wait 10 seconds and try again."
+            return ""
+    return ""
 
 def create_word_report(report_text):
-    """Injects AI data into the branded template.docx."""
+    """
+    Formats the AI report:
+    - Candidate Name for Template Header
+    - Subheaders in Navy (1D457C)
+    - Body in Light Grey (E7E6E6)
+    - Removes all **bold** markdown
+    """
     try:
         doc = DocxTemplate("template.docx")
         
-        # Metadata Extraction
+        # 1. Metadata Extraction
         name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
         
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # Clean report text for the Word body
-        clean_report = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
-        clean_report = re.sub(r"CATEGORY:.*?\n", "", clean_report).strip()
+        # 2. Body Cleaning: Remove Metadata and Bold markers
+        clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
+        clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
+        clean_body = clean_body.replace("**", "").strip()
+
+        # 3. Build RichText for Word
+        rt = RichText(font='Calibri', size=22, color='E7E6E6')
+        lines = clean_body.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                rt.add('\n')
+                continue
+            
+            # Identify Subheadings (Lines starting with ### or ##)
+            if line.startswith('###') or line.startswith('##'):
+                display_text = line.lstrip('#').strip()
+                # Subheader Color: 1D457C (Navy)
+                rt.add('\n' + display_text, font='Calibri', size=26, color='1D457C', bold=True)
+                rt.add('\n')
+            else:
+                # Body Text Color: E7E6E6 (Light Grey)
+                rt.add(line + '\n', color='E7E6E6')
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),
-            'REPORT_CONTENT': clean_report,
+            'REPORT_CONTENT': rt,
             'REC_READY': "✅" if category == "READY" else "⬜",
             'REC_IMPROVE': "✅" if category == "IMPROVE" else "⬜",
             'REC_MAJOR': "✅" if category == "MAJOR" else "⬜",
@@ -105,62 +123,55 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Word Template Error: {e}. Check if template.docx is in your repo.")
+        st.error(f"Formatting Error: {e}")
         return None
 
 def run_analysis(cv_text, jd_text):
-    """Main analysis logic with chunking and Swiss-specific prompts."""
-    cv_chunks = wrap(cv_text, 8000)
-    jd_chunks = wrap(jd_text, 8000) if jd_text else []
-    cv_summary, jd_summary = "", ""
-
-    progress = st.progress(0, text="Swiss Recruiter AI is processing...")
-
-    for i, chunk in enumerate(cv_chunks):
-        cv_summary += call_gemini(f"Extract key career facts, technical skills, and achievements: {chunk}") + "\n"
-        progress.progress((i + 0.5) / (len(cv_chunks) + max(len(jd_chunks), 1)))
-        time.sleep(1)
-
-    for i, chunk in enumerate(jd_chunks):
-        jd_summary += call_gemini(f"Extract core requirements and KPIs: {chunk}") + "\n"
-        progress.progress((len(cv_chunks) + i + 1) / (len(cv_chunks) + len(jd_chunks)))
-        time.sleep(1)
+    """Chunks the text and runs the final recruitment analysis."""
+    progress = st.progress(0, text="Swiss Recruiter AI is gathering data...")
+    
+    cv_summary = call_gemini(f"Extract key career facts, technical skills, and achievements: {cv_text[:8000]}")
+    progress.progress(0.4)
+    
+    jd_summary = call_gemini(f"Extract core requirements and KPIs: {jd_text[:8000]}") if jd_text else "General Standard"
+    progress.progress(0.7)
 
     final_prompt = f"""
     You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the JD.
     
-    CRITICAL METADATA:
+    METADATA (MANDATORY):
     NAME_START: [Candidate Full Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR] 
     (READY if score > 85, IMPROVE if 60-85, MAJOR if < 60)
 
-    STRUCTURE:
-    ## 1. CV PERFORMANCE SCORECARD
-    **OVERALL JOB-FIT SCORE: [Score]/100**
+    INSTRUCTIONS: 
+    - Use the subheadings below starting with '###'.
+    - Do NOT include a main title for the person.
+    - Do NOT use any bold markdown (**).
+    - Lead each section with 'The Fact' (a statistic or hiring standard).
 
-    ## 2. DETAILED CV AUDIT
-    ### 2.1 SWISS COMPLIANCE & FORMATTING
-    - **The Fact:** 85% of Swiss recruiters expect Nationality/Permit and language levels.
-    - **Audit:** [Review photo, personal data, layout]
-    - **Strengthening:** [Specific changes]
+    ### 1. CV PERFORMANCE SCORECARD
+    Overall Job-Fit Score: [Score]/100
 
-    ### 2.2 TECHNICAL & KEYWORD ALIGNMENT
-    - **The Fact:** ATS systems spend 6 seconds on initial screen; 75% rejection if keywords missing.
-    - **Audit:** [Map CV skills against JD]
-    - **Strengthening:** [List 10 specific keywords]
+    ### 2. SWISS COMPLIANCE & FORMATTING
+    The Fact: [Statistic]
+    Audit: [Detailed professional review]
 
-    ### 2.3 EVIDENCE OF IMPACT (KPIs)
-    - **The Fact:** Quantifiable metrics increase interview chances by 40%.
-    - **Audit:** [Analyze current bullet points]
-    - **Strengthening:** [Suggest 5 KPI-based bullets]
+    ### 3. TECHNICAL & KEYWORD ALIGNMENT
+    The Fact: [Statistic]
+    Audit: [Skill mapping]
 
-    ## 3. PRIORITY ACTION PLAN
+    ### 4. EVIDENCE OF IMPACT (KPIs)
+    The Fact: [Statistic]
+    Audit: [Quantifiable results review]
+
+    ### 5. PRIORITY ACTION PLAN
     1. [Most Urgent]
     2. [High Impact]
     3. [Strategic Tip]
 
     CV DATA: {cv_summary}
-    JD DATA: {jd_summary if jd_summary else "General Swiss Life Sciences Standard"}
+    JD DATA: {jd_summary}
     """
     
     result = call_gemini(final_prompt)
@@ -173,11 +184,10 @@ st.title("🇨🇭 Swiss CV & Job Fit Analyser")
 pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
 if pass_input != APP_PASSWORD:
     if pass_input: st.sidebar.error("Incorrect Password")
-    st.info("Authenticate in the sidebar to begin.")
+    st.info("Authenticate in the sidebar to begin analysis.")
     st.stop()
 
 st.sidebar.success("✅ Authenticated")
-st.sidebar.caption(f"Active Model: {model_instance.model_name}")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -193,12 +203,12 @@ if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Analyzing..."):
+        with st.spinner("Analyzing (this may take 30s due to API limits)..."):
             cv_raw = extract_pdf_text(cv_file)
-            jd_raw = extract_pdf_text(jd_file) if jd_file else clean_text(jd_manual)
+            jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             
             if not cv_raw:
-                st.error("Text extraction failed.")
+                st.error("Extraction failed. Ensure PDF contains selectable text.")
             else:
                 report = run_analysis(cv_raw, jd_raw)
                 st.divider()
@@ -210,6 +220,6 @@ if st.button("🚀 Run Analysis"):
                     st.download_button(
                         label="📩 Download Branded Word Report",
                         data=word_file,
-                        file_name="Swiss_CV_Audit_Report.docx",
+                        file_name="Swiss_CV_Audit.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )

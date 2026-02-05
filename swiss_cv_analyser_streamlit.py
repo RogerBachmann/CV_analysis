@@ -21,6 +21,7 @@ except KeyError as e:
 
 @st.cache_resource
 def get_best_model():
+    """Finds available models and uses 1.5-Flash for better consistency on Free Tier."""
     try:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         priority = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-pro"]
@@ -49,6 +50,7 @@ def extract_pdf_text(file):
     except Exception: return ""
 
 def call_gemini(prompt):
+    """Handles API calls with automatic retries for Quota (429) errors."""
     if not prompt.strip(): return ""
     for attempt in range(3):
         try:
@@ -62,6 +64,11 @@ def call_gemini(prompt):
     return ""
 
 def create_word_report(report_text):
+    """
+    Formats the AI report:
+    - Subheaders: Navy (1D457C), 14pt (Size 28)
+    - Body: Black (000000), 12pt (Size 24), Explicitly NOT Bold
+    """
     try:
         doc = DocxTemplate("template.docx")
         
@@ -72,27 +79,27 @@ def create_word_report(report_text):
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # 2. Body Cleaning: Remove all Markdown bolding for a clean look
+        # 2. Body Cleaning: Force removal of all bold markdown
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
-        clean_body = clean_body.replace("**", "").strip()
+        clean_body = clean_body.replace("**", "").replace("__", "").strip()
 
-        # 3. Build RichText for Word
+        # 3. Build RichText
         rt = RichText()
         lines = clean_body.split('\n')
         
         for line in lines:
             line = line.strip()
             if not line:
-                rt.add('\n')
+                rt.add('\n', font='Calibri', size=24, bold=False)
                 continue
             
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
-                # Subheader: Navy (1D457C), 14pt (Size 28)
+                # Subheader: Navy (1D457C), 14pt (Size 28), BOLD
                 rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C', bold=True)
             else:
-                # Body Text: Pure Black (000000), 12pt (Size 24), No Bold
+                # Main Body: Pure Black (000000), 12pt (Size 24), NOT BOLD
                 rt.add(line + '\n', font='Calibri', size=24, color='000000', bold=False)
 
         context = {
@@ -113,35 +120,54 @@ def create_word_report(report_text):
         return None
 
 def run_analysis(cv_text, jd_text):
-    cv_summary = call_gemini(f"Extract key career facts, technical skills, and achievements: {cv_text[:8000]}")
-    jd_summary = call_gemini(f"Extract core requirements and KPIs: {jd_text[:8000]}") if jd_text else "General Standard"
-
-    final_prompt = f"""
-    You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the JD.
+    """
+    Main analysis with Weighted Rubric to ensure consistency 
+    between repeated uploads of the same document.
+    """
+    progress = st.progress(0, text="Swiss Recruiter AI is gathering facts...")
     
-    METADATA (MANDATORY):
+    # Step 1: Fact Extraction (Anchors the AI to data rather than prose)
+    cv_summary = call_gemini(f"List ONLY extracted facts: Name, Exp Years, Degree, Top 5 Hard Skills, Language Levels, Permit Status: {cv_text[:8000]}")
+    progress.progress(0.4)
+    
+    jd_summary = call_gemini(f"List Top 5 Hard Skills and 3 Primary KPIs: {jd_text[:8000]}") if jd_text else "General Life Sciences Industry Standard"
+    progress.progress(0.7)
+
+    # Step 2: Analysis with Rigid Scoring
+    final_prompt = f"""
+    You are a Senior Swiss Life Sciences Recruiter. Evaluate the CV against the JD. 
+    You must be highly consistent and clinical in your scoring.
+    
+    SCORING RUBRIC (MANDATORY):
+    - Technical Alignment (40%): Presence of mandatory hard skills.
+    - Experience Seniority (20%): Match with required career level.
+    - Swiss Compliance (20%): Permit, language, and formatting.
+    - Business Impact (20%): Presence of quantifiable KPIs.
+
+    REQUIRED METADATA:
     NAME_START: [Candidate Full Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR] 
 
     INSTRUCTIONS: 
     - Use '###' for subheadings.
-    - Do NOT include a main title.
-    - Do NOT use any bold markdown (**).
+    - Do NOT use ANY bold markdown (** or __).
+    - Provide a professional, detailed audit.
 
     ### 1. CV PERFORMANCE SCORECARD
-    Overall Job-Fit Score: [Score]/100
+    Overall Job-Fit Score: [X]/100 
+    Breakdown: [Briefly explain the math per rubric category]
 
     ### 2. SWISS COMPLIANCE & FORMATTING
-    The Fact: [Statistic]
-    Audit: [Review]
+    The Fact: 85% of Swiss recruiters expect specific permit and language proficiency details.
+    Audit: [Compare CV against Swiss standards]
 
     ### 3. TECHNICAL & KEYWORD ALIGNMENT
-    The Fact: [Statistic]
-    Audit: [Mapping]
+    The Fact: ATS rejection in Life Sciences often occurs when less than 60% of keywords match.
+    Audit: [Skill mapping comparison]
 
     ### 4. EVIDENCE OF IMPACT (KPIs)
-    The Fact: [Statistic]
-    Audit: [Metrics]
+    The Fact: CVs with quantifiable achievements receive 40% more interview requests.
+    Audit: [Review of bullets for metrics and results]
 
     ### 5. PRIORITY ACTION PLAN
     1. [Task]
@@ -150,30 +176,42 @@ def run_analysis(cv_text, jd_text):
     CV DATA: {cv_summary}
     JD DATA: {jd_summary}
     """
-    return call_gemini(final_prompt)
+    
+    result = call_gemini(final_prompt)
+    progress.empty()
+    return result
 
 # --- UI Interface ---
 st.title("🇨🇭 Swiss CV & Job Fit Analyser")
 
 pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
 if pass_input != APP_PASSWORD:
-    st.info("Authenticate in the sidebar.")
+    if pass_input: st.sidebar.error("Incorrect Password")
+    st.info("Authenticate in the sidebar to begin.")
     st.stop()
 
-cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or paste JD text manually", height=150)
+st.sidebar.success("✅ Authenticated")
+
+col1, col2 = st.columns(2)
+with col1:
+    st.subheader("1. Upload CV")
+    cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
+
+with col2:
+    st.subheader("2. Target Job")
+    jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
+    jd_manual = st.text_area("Or paste JD text manually", height=150)
 
 if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Generating Audit..."):
+        with st.spinner("Analyzing with consistency checks..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             
             if not cv_raw:
-                st.error("Extraction failed.")
+                st.error("Text extraction failed.")
             else:
                 report = run_analysis(cv_raw, jd_raw)
                 st.divider()

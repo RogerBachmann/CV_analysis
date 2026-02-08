@@ -90,13 +90,12 @@ def create_word_report(report_text):
             
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
-                # Subheader: Navy (1D457C), 14pt (Size 28)
-                rt.add(display_text, font='Calibri', size=28, color='1D457C')
+                # Subheading: Blue (2F5496), 14pt (Size 28), No Bold
+                rt.add(display_text, font='Calibri', size=28, color='2F5496', bold=False)
                 rt.add('\n')
             else:
-                # Body Text: Light Grey (E7E6E6), 12pt (Size 24)
-                # We apply formatting to the line and the newline separately
-                rt.add(line, font='Calibri', size=24, color='E7E6E6')
+                # Body Text: Black (000000), 12pt (Size 24), No Bold
+                rt.add(line, font='Calibri', size=24, color='000000', bold=False)
                 rt.add('\n')
 
         context = {

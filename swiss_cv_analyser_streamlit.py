@@ -18,12 +18,37 @@ except KeyError as e:
     st.error(f"Secret {e} not found.")
     st.stop()
 
-# CHANGE: Using the most compatible model string format
-try:
-    model_instance = genai.GenerativeModel("gemini-1.5-flash")
-except Exception as e:
-    st.error(f"Model Init Error: {e}")
+# --- Multi-Version Model Hunter ---
+@st.cache_resource
+def get_working_model():
+    """Iterates through version strings until one works."""
+    # Possible strings for Gemini 1.5 Flash and Pro
+    model_variants = [
+        "gemini-1.5-flash",
+        "models/gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "models/gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+        "models/gemini-pro"
+    ]
+    
+    for variant in model_variants:
+        try:
+            model = genai.GenerativeModel(variant)
+            # Perform a tiny 'ping' to verify the model exists and is reachable
+            model.generate_content("ping", generation_config={"max_output_tokens": 1})
+            return model, variant
+        except Exception:
+            continue
+            
+    st.error("All model versions failed (404). Check if your API Key is active in Google AI Studio.")
     st.stop()
+
+# Initialize the hunter
+model_instance, active_variant = get_working_model()
+st.sidebar.success(# Using f-string for variable
+    f"Connected via: {active_variant}"
+)
 
 # --- Helper Functions ---
 def clean_text(text):
@@ -44,18 +69,13 @@ def extract_pdf_text(file):
 def call_gemini(prompt):
     if not prompt.strip(): return ""
     try:
-        # Generate content with a timeout/safety check
         response = model_instance.generate_content(prompt)
-        if hasattr(response, 'text'):
-            return response.text.strip()
-        else:
-            return "Error: Response blocked by safety filters or empty."
+        return response.text.strip()
     except Exception as e:
         if "429" in str(e):
-            time.sleep(10)
+            time.sleep(12) # Rate limit cooling
             response = model_instance.generate_content(prompt)
             return response.text.strip()
-        st.error(f"API Error: {e}")
         return ""
 
 def create_word_report(report_text):
@@ -90,27 +110,24 @@ def create_word_report(report_text):
     except Exception: return None
 
 def run_analysis(cv_text, jd_text):
-    # Step 1: CV Summary
-    cv_sum = call_gemini(f"Extract key career facts: {cv_text[:8000]}")
+    # Sequential Execution
+    cv_sum = call_gemini(f"Summary of CV facts: {cv_text[:7000]}")
     if not cv_sum: return None
-    time.sleep(2)
+    time.sleep(3)
     
-    # Step 2: JD Summary
-    jd_sum = call_gemini(f"Extract core requirements: {jd_text[:8000]}") if jd_text else "General CQV standard"
+    jd_sum = call_gemini(f"Summary of JD: {jd_text[:7000]}") if jd_text else "General"
     if not jd_sum: return None
-    time.sleep(2)
+    time.sleep(3)
     
-    # Step 3: Comparison
     prompt = f"""
-    You are a Swiss Recruiter. Evaluate this CV vs JD for a Life Sciences role.
+    Swiss Life Sciences Recruiter Role.
     NAME_START: [Candidate Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR]
     ### 1. SCORECARD
-    Fit Score: [X]/100
+    Fit: [X]/100
     ### 2. AUDIT
-    Review: ...
-    CV DATA: {cv_sum}
-    JD DATA: {jd_sum}
+    CV: {cv_sum}
+    JD: {jd_sum}
     """
     return call_gemini(prompt)
 
@@ -119,25 +136,21 @@ st.title("🇨🇭 Swiss CV Analyser")
 
 pass_input = st.sidebar.text_input("Admin Password", type="password")
 if pass_input != APP_PASSWORD:
-    st.info("Please enter the admin password in the sidebar.")
     st.stop()
 
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
 jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or paste JD manually")
+jd_manual = st.text_area("Or paste JD text")
 
 if st.button("🚀 Run Analysis"):
     if cv_file:
-        with st.spinner("Processing Sequential Steps..."):
+        with st.spinner("Step-by-step processing..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
-            
             report = run_analysis(cv_raw, jd_raw)
             if report:
                 st.markdown(report)
                 word = create_word_report(report)
                 if word:
-                    st.download_button("📩 Download Word Report", word, "Swiss_CV_Audit.docx")
-    else:
-        st.warning("Please upload a CV.")
-        
+                    st.download_button("📩 Download Report", word, "Audit.docx")
+                    

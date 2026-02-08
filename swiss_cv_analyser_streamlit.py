@@ -75,27 +75,27 @@ def create_word_report(report_text):
         # 2. Body Cleaning
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
-        # Stripping all possible Markdown bold markers just in case
-        clean_body = clean_body.replace("**", "").replace("__", "").strip()
+        clean_body = clean_body.replace("**", "").strip()
 
         # 3. Build RichText for Word
+        # We use size=24 because docxtpl often uses half-points (24 = 12pt)
         rt = RichText()
         lines = clean_body.split('\n')
         
         for line in lines:
             line = line.strip()
             if not line:
-                # Add a blank line with regular formatting
-                rt.add('\n', font='Calibri', size=24, bold=False)
+                rt.add('\n')
                 continue
             
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
-                # Subheader: Navy (1D457C), 14pt (Size 28), BOLD
-                rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C', bold=True)
+                # Subheader: Navy (1D457C), 14pt (Size 28)
+                rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C')
             else:
-                # Main Body: Pure Black (000000), 12pt (Size 24), EXPLICITLY NOT BOLD
-                rt.add(line + '\n', font='Calibri', size=24, color='000000', bold=False)
+                # Body Text: Light Grey (E7E6E6), 12pt (Size 24)
+                # Ensure we add the line break explicitly
+                rt.add(line + '\n', font='Calibri', size=24, color='E7E6E6')
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),
@@ -128,8 +128,7 @@ def run_analysis(cv_text, jd_text):
     INSTRUCTIONS: 
     - Use '###' for subheadings.
     - Do NOT include a main title.
-    - Do NOT use ANY bold markdown (** or __).
-    - Provide a professional, clean audit.
+    - Do NOT use any bold markdown (**).
 
     ### 1. CV PERFORMANCE SCORECARD
     Overall Job-Fit Score: [Score]/100
@@ -171,7 +170,7 @@ if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Generating Audit..."):
+        with st.spinner("Analyzing..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             

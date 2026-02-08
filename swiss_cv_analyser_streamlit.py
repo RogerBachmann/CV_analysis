@@ -15,18 +15,14 @@ try:
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
     genai.configure(api_key=GEMINI_API_KEY)
 except KeyError as e:
-    st.error(f"Secret {e} not found in Streamlit Secrets.")
-    st.stop()
-except Exception as e:
-    st.error(f"Configuration Error: {e}")
+    st.error(f"Error: Secret {e} not found.")
     st.stop()
 
 @st.cache_resource
 def get_best_model():
     try:
-        # Standard fallback logic for model availability
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        priority = ["models/gemini-1.5-flash", "models/gemini-pro"]
+        priority = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-pro"]
         for p in priority:
             if p in available_models: return genai.GenerativeModel(p)
         return genai.GenerativeModel(available_models[0])
@@ -38,7 +34,6 @@ model_instance = get_best_model()
 # --- Helper Functions ---
 def clean_text(text):
     if not text: return ""
-    # Remove non-printable characters and collapse whitespace
     text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -50,8 +45,7 @@ def extract_pdf_text(file):
                 content = page.extract_text()
                 if content: text += content + " "
         return clean_text(text)
-    except Exception:
-        return ""
+    except Exception: return ""
 
 def call_gemini(prompt):
     if not prompt.strip(): return ""
@@ -60,8 +54,8 @@ def call_gemini(prompt):
             response = model_instance.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            if "429" in str(e): # Handle Rate Limiting
-                time.sleep(5)
+            if "429" in str(e):
+                time.sleep(8)
                 continue
             return ""
     return ""
@@ -70,20 +64,19 @@ def create_word_report(report_text):
     try:
         doc = DocxTemplate("template.docx")
         
-        # 1. Metadata Extraction (Using robust regex)
-        name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text, re.DOTALL)
+        # 1. Metadata Extraction
+        name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
-        
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # 2. Body Cleaning
-        clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text, flags=re.DOTALL)
+        # 2. Body Cleaning (Aggressive Bold Scrubbing)
+        clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
-        # Scrub all markdown bold/italic markers
-        clean_body = clean_body.replace("**", "").replace("__", "").replace("*", "").strip()
+        # Remove markdown bold (**) and extra symbols
+        clean_body = clean_body.replace("**", "").replace("__", "").strip()
 
-        # 3. Build RichText for Word
+        # 3. Build RichText with Total Control
         rt = RichText()
         lines = clean_body.split('\n')
         
@@ -91,18 +84,20 @@ def create_word_report(report_text):
             line_content = line.strip()
             
             if not line_content:
-                # Force a plain newline that breaks any style chain
+                # Add a blank line with standard body properties to prevent "bold carry-over"
                 rt.add('\n', font='Calibri', size=24, bold=False, italic=False)
                 continue
             
             if line_content.startswith('###') or line_content.startswith('##'):
-                # SUBHEADER: Blue (2F5496), 14pt (Size 28), Explicitly NOT bold
-                display_text = line_content.lstrip('#').strip()
-                rt.add(display_text, font='Calibri', size=28, color='2F5496', bold=False, italic=False)
+                # SUBHEADING: Blue 2F5496, 14pt (28), No Bold
+                display_header = line_content.lstrip('#').strip()
+                rt.add(display_header, font='Calibri', size=28, color='2F5496', bold=False, italic=False)
+                # Add newline separately to reset the "Run"
                 rt.add('\n', font='Calibri', size=28, bold=False)
             else:
-                # BODY: Black (000000), 12pt (Size 24), Explicitly NOT bold
+                # BODY: Black, 12pt (24), No Bold
                 rt.add(line_content, font='Calibri', size=24, color='000000', bold=False, italic=False)
+                # Add newline separately
                 rt.add('\n', font='Calibri', size=24, bold=False)
 
         context = {
@@ -119,82 +114,80 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Critical Formatting/Word Error: {e}")
+        st.error(f"Formatting Error: {e}")
         return None
 
 def run_analysis(cv_text, jd_text):
-    cv_summary = call_gemini(f"Summarize CV: {cv_text[:8000]}")
-    jd_summary = call_gemini(f"Summarize JD: {jd_text[:8000]}") if jd_text else "General Life Sciences Standards"
+    cv_summary = call_gemini(f"Extract career facts: {cv_text[:8000]}")
+    jd_summary = call_gemini(f"Extract core requirements: {jd_text[:8000]}") if jd_text else "General Standard"
 
     final_prompt = f"""
-    You are a Senior Swiss Life Sciences Recruiter. Evaluate the CV.
+    You are a Senior Swiss Life Sciences Recruiter. Analyze this CV.
     
     METADATA (MANDATORY):
-    NAME_START: [Full Name] NAME_END
+    NAME_START: [Candidate Full Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR] 
 
     INSTRUCTIONS: 
     - Use '###' for subheadings.
     - NEVER use bold markdown (**).
-    - Provide a direct, professional audit.
+    - Provide professional, clear auditing.
 
     ### 1. CV PERFORMANCE SCORECARD
-    Overall Fit: [Score]/100
+    Overall Job-Fit Score: [Score]/100
 
-    ### 2. SWISS COMPLIANCE
-    Status: [Review]
+    ### 2. SWISS COMPLIANCE & FORMATTING
+    Fact: [Statistic]
+    Audit: [Review]
 
-    ### 3. TECHNICAL ALIGNMENT
-    Mapping: [Mapping]
+    ### 3. TECHNICAL & KEYWORD ALIGNMENT
+    Fact: [Statistic]
+    Audit: [Mapping]
 
-    ### 4. IMPACT & KPIs
-    Evidence: [Metrics]
+    ### 4. EVIDENCE OF IMPACT (KPIs)
+    Fact: [Statistic]
+    Audit: [Metrics]
 
-    ### 5. PRIORITY ACTIONS
-    - [Task]
+    ### 5. PRIORITY ACTION PLAN
+    1. [Task]
+    2. [Task]
 
-    CV: {cv_summary}
-    JD: {jd_summary}
+    CV DATA: {cv_summary}
+    JD DATA: {jd_summary}
     """
     return call_gemini(final_prompt)
 
 # --- UI Interface ---
 st.title("🇨🇭 Swiss CV & Job Fit Analyser")
 
-# Authentication
-if "APP_PASSWORD" in st.secrets:
-    pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
-    if pass_input != st.secrets["APP_PASSWORD"]:
-        st.info("Please authenticate to continue.")
-        st.stop()
+pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
+if pass_input != APP_PASSWORD:
+    st.info("Authenticate in the sidebar.")
+    st.stop()
 
-# File Uploads
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_file = st.file_uploader("Upload Job Description (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or Paste JD Text Here", height=150)
+jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
+jd_manual = st.text_area("Or paste JD text manually", height=150)
 
 if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Analyzing with Gemini AI..."):
+        with st.spinner("Analyzing..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             
             if not cv_raw:
-                st.error("Failed to read CV content.")
+                st.error("Extraction failed.")
             else:
                 report = run_analysis(cv_raw, jd_raw)
-                
-                # Display Results
                 st.divider()
                 st.markdown(report)
                 
-                # Generate Document
                 word_file = create_word_report(report)
                 if word_file:
                     st.download_button(
-                        label="📩 Download Branded Word Report",
+                        label="📩 Download Word Report",
                         data=word_file,
                         file_name="Swiss_CV_Audit.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"

@@ -1,7 +1,6 @@
 import streamlit as st
 import pdfplumber
 import google.generativeai as genai
-from textwrap import wrap
 import re
 import io
 import time
@@ -68,36 +67,33 @@ def create_word_report(report_text):
         # 1. Metadata Extraction
         name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
-        
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # 2. Body Cleaning
+        # 2. Body Cleaning (Remove AI markdown)
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
         clean_body = clean_body.replace("**", "").strip()
 
-        # 3. Build RichText for Word
+        # 3. Build RichText
         rt = RichText()
         lines = clean_body.split('\n')
         
         for line in lines:
-            line = line.strip()
-            
-            if not line:
-                # Explicitly non-bold newline
-                rt.add('\n', font='Calibri', size=24, bold=False)
+            line_content = line.strip()
+            if not line_content:
+                rt.add('\n')
                 continue
             
-            if line.startswith('###') or line.startswith('##'):
-                display_text = line.lstrip('#').strip()
-                # Subheading: Blue (2F5496), 14pt (Size 28), Force No Bold
-                rt.add(display_text, font='Calibri', size=28, color='2F5496', bold=False)
-                rt.add('\n', font='Calibri', size=28, bold=False)
+            if line_content.startswith('###') or line_content.startswith('##'):
+                # Subheadings: Blue (2F5496), No Bold
+                rt.add(line_content.lstrip('#').strip(), color='2F5496', bold=False)
+                rt.add('\n')
             else:
-                # Body Text: Black (000000), 12pt (Size 24), Force No Bold
-                rt.add(line, font='Calibri', size=24, color='000000', bold=False)
-                rt.add('\n', font='Calibri', size=24, bold=False)
+                # Body Text: Standard Black, No Bold
+                # This will adopt the font/size you set for the tag in Word
+                rt.add(line_content, color='000000', bold=False)
+                rt.add('\n')
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),
@@ -117,42 +113,32 @@ def create_word_report(report_text):
         return None
 
 def run_analysis(cv_text, jd_text):
-    cv_summary = call_gemini(f"Extract key career facts, technical skills, and achievements: {cv_text[:8000]}")
-    jd_summary = call_gemini(f"Extract core requirements and KPIs: {jd_text[:8000]}") if jd_text else "General Standard"
+    cv_summary = call_gemini(f"Extract key career facts: {cv_text[:8000]}")
+    jd_summary = call_gemini(f"Extract core requirements: {jd_text[:8000]}") if jd_text else "General Standard"
 
     final_prompt = f"""
-    You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the JD.
-    
-    METADATA (MANDATORY):
-    NAME_START: [Candidate Full Name] NAME_END
+    You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV.
+    METADATA:
+    NAME_START: [Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR] 
 
     INSTRUCTIONS: 
     - Use '###' for subheadings.
-    - Do NOT include a main title.
-    - Do NOT use any bold markdown (**).
+    - No bold markdown (**).
 
     ### 1. CV PERFORMANCE SCORECARD
     Overall Job-Fit Score: [Score]/100
-
-    ### 2. SWISS COMPLIANCE & FORMATTING
-    The Fact: [Statistic]
-    Audit: [Review]
-
-    ### 3. TECHNICAL & KEYWORD ALIGNMENT
-    The Fact: [Statistic]
-    Audit: [Mapping]
-
-    ### 4. EVIDENCE OF IMPACT (KPIs)
-    The Fact: [Statistic]
-    Audit: [Metrics]
-
+    ### 2. SWISS COMPLIANCE
+    Review: [Review]
+    ### 3. TECHNICAL ALIGNMENT
+    Mapping: [Mapping]
+    ### 4. EVIDENCE OF IMPACT
+    Metrics: [Metrics]
     ### 5. PRIORITY ACTION PLAN
     1. [Task]
-    2. [Task]
 
-    CV DATA: {cv_summary}
-    JD DATA: {jd_summary}
+    CV: {cv_summary}
+    JD: {jd_summary}
     """
     return call_gemini(final_prompt)
 
@@ -166,7 +152,7 @@ if pass_input != APP_PASSWORD:
 
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
 jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or paste JD text manually", height=150)
+jd_manual = st.text_area("Or paste JD text", height=150)
 
 if st.button("🚀 Run Analysis"):
     if not cv_file:
@@ -176,18 +162,9 @@ if st.button("🚀 Run Analysis"):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             
-            if not cv_raw:
-                st.error("Extraction failed.")
-            else:
+            if cv_raw:
                 report = run_analysis(cv_raw, jd_raw)
-                st.divider()
                 st.markdown(report)
-                
                 word_file = create_word_report(report)
                 if word_file:
-                    st.download_button(
-                        label="📩 Download Branded Word Report",
-                        data=word_file,
-                        file_name="Swiss_CV_Audit.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
+                    st.download_button("📩 Download Word Report", word_file, "Swiss_CV_Audit.docx")

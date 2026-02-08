@@ -70,30 +70,35 @@ def create_word_report(report_text):
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # 2. Body Cleaning (Remove AI markdown)
+        # 2. Body Cleaning (Aggressive Bold Scrubbing)
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
-        clean_body = clean_body.replace("**", "").strip()
+        # Remove markdown bold (**) and extra symbols
+        clean_body = clean_body.replace("**", "").replace("__", "").strip()
 
-        # 3. Build RichText
+        # 3. Build RichText with Total Control
         rt = RichText()
         lines = clean_body.split('\n')
         
         for line in lines:
             line_content = line.strip()
+            
             if not line_content:
-                rt.add('\n')
+                # Add a blank line with standard body properties to prevent "bold carry-over"
+                rt.add('\n', font='Calibri', size=24, bold=False, italic=False)
                 continue
             
             if line_content.startswith('###') or line_content.startswith('##'):
-                # Subheadings: Blue (2F5496), No Bold
-                rt.add(line_content.lstrip('#').strip(), color='2F5496', bold=False)
-                rt.add('\n')
+                # SUBHEADING: Blue 2F5496, 14pt (28), No Bold
+                display_header = line_content.lstrip('#').strip()
+                rt.add(display_header, font='Calibri', size=28, color='2F5496', bold=False, italic=False)
+                # Add newline separately to reset the "Run"
+                rt.add('\n', font='Calibri', size=28, bold=False)
             else:
-                # Body Text: Standard Black, No Bold
-                # This will adopt the font/size you set for the tag in Word
-                rt.add(line_content, color='000000', bold=False)
-                rt.add('\n')
+                # BODY: Black, 12pt (24), No Bold
+                rt.add(line_content, font='Calibri', size=24, color='000000', bold=False, italic=False)
+                # Add newline separately
+                rt.add('\n', font='Calibri', size=24, bold=False)
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),
@@ -113,32 +118,42 @@ def create_word_report(report_text):
         return None
 
 def run_analysis(cv_text, jd_text):
-    cv_summary = call_gemini(f"Extract key career facts: {cv_text[:8000]}")
+    cv_summary = call_gemini(f"Extract career facts: {cv_text[:8000]}")
     jd_summary = call_gemini(f"Extract core requirements: {jd_text[:8000]}") if jd_text else "General Standard"
 
     final_prompt = f"""
-    You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV.
-    METADATA:
-    NAME_START: [Name] NAME_END
+    You are a Senior Swiss Life Sciences Recruiter. Analyze this CV.
+    
+    METADATA (MANDATORY):
+    NAME_START: [Candidate Full Name] NAME_END
     CATEGORY: [READY, IMPROVE, or MAJOR] 
 
     INSTRUCTIONS: 
     - Use '###' for subheadings.
-    - No bold markdown (**).
+    - NEVER use bold markdown (**).
+    - Provide professional, clear auditing.
 
     ### 1. CV PERFORMANCE SCORECARD
     Overall Job-Fit Score: [Score]/100
-    ### 2. SWISS COMPLIANCE
-    Review: [Review]
-    ### 3. TECHNICAL ALIGNMENT
-    Mapping: [Mapping]
-    ### 4. EVIDENCE OF IMPACT
-    Metrics: [Metrics]
+
+    ### 2. SWISS COMPLIANCE & FORMATTING
+    Fact: [Statistic]
+    Audit: [Review]
+
+    ### 3. TECHNICAL & KEYWORD ALIGNMENT
+    Fact: [Statistic]
+    Audit: [Mapping]
+
+    ### 4. EVIDENCE OF IMPACT (KPIs)
+    Fact: [Statistic]
+    Audit: [Metrics]
+
     ### 5. PRIORITY ACTION PLAN
     1. [Task]
+    2. [Task]
 
-    CV: {cv_summary}
-    JD: {jd_summary}
+    CV DATA: {cv_summary}
+    JD DATA: {jd_summary}
     """
     return call_gemini(final_prompt)
 
@@ -152,7 +167,7 @@ if pass_input != APP_PASSWORD:
 
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
 jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or paste JD text", height=150)
+jd_manual = st.text_area("Or paste JD text manually", height=150)
 
 if st.button("🚀 Run Analysis"):
     if not cv_file:
@@ -162,9 +177,18 @@ if st.button("🚀 Run Analysis"):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             
-            if cv_raw:
+            if not cv_raw:
+                st.error("Extraction failed.")
+            else:
                 report = run_analysis(cv_raw, jd_raw)
+                st.divider()
                 st.markdown(report)
+                
                 word_file = create_word_report(report)
                 if word_file:
-                    st.download_button("📩 Download Word Report", word_file, "Swiss_CV_Audit.docx")
+                    st.download_button(
+                        label="📩 Download Word Report",
+                        data=word_file,
+                        file_name="Swiss_CV_Audit.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )

@@ -1,179 +1,143 @@
-import os
+import streamlit as st
 import pdfplumber
 import google.generativeai as genai
-from datetime import datetime
 import re
-from collections import Counter
+import io
+import time
+from docxtpl import DocxTemplate, RichText
 
-# -------------------------
-# API
-# -------------------------
+# --- Page Configuration ---
+st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨🇭", layout="wide")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# --- API & Password Setup ---
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+    genai.configure(api_key=GEMINI_API_KEY)
+except KeyError as e:
+    st.error(f"Secret {e} not found.")
+    st.stop()
 
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not found in environment variables")
+# CHANGE: Using the most compatible model string format
+try:
+    model_instance = genai.GenerativeModel("gemini-1.5-flash")
+except Exception as e:
+    st.error(f"Model Init Error: {e}")
+    st.stop()
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+# --- Helper Functions ---
+def clean_text(text):
+    if not text: return ""
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
-# -------------------------
-# PDF TEXT EXTRACTION
-# -------------------------
-
-def extract_text(pdf_path):
+def extract_pdf_text(file):
     text = ""
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            if page.extract_text():
-                text += page.extract_text() + "\n"
-    return text
+    try:
+        with pdfplumber.open(io.BytesIO(file.read())) as pdf:
+            for page in pdf.pages:
+                content = page.extract_text()
+                if content: text += content + " "
+        return clean_text(text)
+    except Exception: return ""
 
-# -------------------------
-# SWISS CV KEYWORD LAYERS
-# -------------------------
-
-CORE_TERMS = [
-    "gmp","gcp","glp","quality assurance","regulatory affairs",
-    "clinical operations","medical affairs","manufacturing",
-    "validation","process improvement","compliance","audits"
-]
-
-SENIORITY_TERMS = [
-    "director","head","senior","lead","principal","global",
-    "strategic","budget responsibility","people management",
-    "stakeholder management","cross functional"
-]
-
-DIGITAL_TERMS = [
-    "sap","automation","digital transformation","data driven",
-    "process optimisation","lean","six sigma","agile"
-]
-
-RESULT_TERMS = [
-    "increased","reduced","optimised","delivered","achieved",
-    "improved","launched","implemented","led"
-]
-
-ALL_STATIC_KEYWORDS = CORE_TERMS + SENIORITY_TERMS + DIGITAL_TERMS + RESULT_TERMS
-
-# -------------------------
-# JOB DESCRIPTION KEYWORDS
-# -------------------------
-
-def extract_jd_keywords(text, top_n=50):
-    words = re.findall(r"[a-zA-Z]{3,}", text.lower())
-    freq = Counter(words)
-    common = [w for w,_ in freq.most_common(top_n)]
-    return common
-
-# -------------------------
-# KEYWORD ANALYSIS
-# -------------------------
-
-def keyword_analysis(cv_text, keywords):
-    found = []
-    missing = []
-
-    lower = cv_text.lower()
-
-    for k in keywords:
-        if k in lower:
-            found.append(k)
+def call_gemini(prompt):
+    if not prompt.strip(): return ""
+    try:
+        # Generate content with a timeout/safety check
+        response = model_instance.generate_content(prompt)
+        if hasattr(response, 'text'):
+            return response.text.strip()
         else:
-            missing.append(k)
+            return "Error: Response blocked by safety filters or empty."
+    except Exception as e:
+        if "429" in str(e):
+            time.sleep(10)
+            response = model_instance.generate_content(prompt)
+            return response.text.strip()
+        st.error(f"API Error: {e}")
+        return ""
 
-    return found, missing
+def create_word_report(report_text):
+    try:
+        doc = DocxTemplate("template.docx")
+        name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
+        candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
+        cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
+        category = cat_match.group(1) if cat_match else "IMPROVE"
+        
+        clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
+        clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body).replace("**", "").strip()
+        
+        rt = RichText()
+        for line in clean_body.split('\n'):
+            line = line.strip()
+            if not line: rt.add('\n')
+            elif line.startswith('###'): rt.add('\n'+line.lstrip('#').strip()+'\n', size=28, color='1D457C')
+            else: rt.add(line + '\n', size=24)
 
-# -------------------------
-# AI RECRUITER ANALYSIS
-# -------------------------
+        doc.render({
+            'CANDIDATE_NAME': candidate_name.upper(), 
+            'REPORT_CONTENT': rt,
+            'REC_READY': "✅" if category == "READY" else "⬜",
+            'REC_IMPROVE': "✅" if category == "IMPROVE" else "⬜",
+            'REC_MAJOR': "✅" if category == "MAJOR" else "⬜"
+        })
+        bio = io.BytesIO()
+        doc.save(bio)
+        bio.seek(0)
+        return bio
+    except Exception: return None
 
-def ai_cv_review(cv_text, jd_text=None):
-
-    jd_section = f"\nTARGET ROLE DESCRIPTION:\n{jd_text}\n" if jd_text else ""
-
+def run_analysis(cv_text, jd_text):
+    # Step 1: CV Summary
+    cv_sum = call_gemini(f"Extract key career facts: {cv_text[:8000]}")
+    if not cv_sum: return None
+    time.sleep(2)
+    
+    # Step 2: JD Summary
+    jd_sum = call_gemini(f"Extract core requirements: {jd_text[:8000]}") if jd_text else "General CQV standard"
+    if not jd_sum: return None
+    time.sleep(2)
+    
+    # Step 3: Comparison
     prompt = f"""
-You are a senior Swiss Life Sciences recruiter.
+    You are a Swiss Recruiter. Evaluate this CV vs JD for a Life Sciences role.
+    NAME_START: [Candidate Name] NAME_END
+    CATEGORY: [READY, IMPROVE, or MAJOR]
+    ### 1. SCORECARD
+    Fit Score: [X]/100
+    ### 2. AUDIT
+    Review: ...
+    CV DATA: {cv_sum}
+    JD DATA: {jd_sum}
+    """
+    return call_gemini(prompt)
 
-Analyse this CV according to Swiss pharma hiring standards.
+# --- UI Interface ---
+st.title("🇨🇭 Swiss CV Analyser")
 
-Focus on:
+pass_input = st.sidebar.text_input("Admin Password", type="password")
+if pass_input != APP_PASSWORD:
+    st.info("Please enter the admin password in the sidebar.")
+    st.stop()
 
-1. ATS searchability
-2. Keyword strength
-3. Seniority clarity
-4. Impact vs task listing
-5. Leadership signalling
-6. Market positioning for Switzerland
-7. Alignment to target role if provided
+cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
+jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
+jd_manual = st.text_area("Or paste JD manually")
 
-Give:
-
-- Clear strengths
-- Critical weaknesses
-- Missing strategic elements
-- Concrete improvement actions
-
-CV:
-{cv_text}
-
-{jd_section}
-"""
-
-    response = model.generate_content(prompt)
-    return response.text
-
-# -------------------------
-# MAIN
-# -------------------------
-
-def run_analysis():
-
-    cv_file = input("Enter CV PDF filename: ").strip()
-
-    if not os.path.exists(cv_file):
-        print("CV file not found")
-        return
-
-    jd_file = input("Enter Job Description PDF (or press Enter to skip): ").strip()
-
-    cv_text = extract_text(cv_file)
-
-    jd_text = None
-    keywords = ALL_STATIC_KEYWORDS.copy()
-
-    if jd_file:
-        if os.path.exists(jd_file):
-            jd_text = extract_text(jd_file)
-            jd_keywords = extract_jd_keywords(jd_text)
-            keywords.extend(jd_keywords)
-        else:
-            print("JD file not found. Continuing without JD.")
-
-    found, missing = keyword_analysis(cv_text, keywords)
-
-    ai_feedback = ai_cv_review(cv_text, jd_text)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"Swiss_CV_Analysis_{timestamp}.txt"
-
-    with open(output_file, "w", encoding="utf-8") as f:
-
-        f.write("SWISS CV ANALYSIS\n\n")
-
-        f.write("KEYWORDS FOUND:\n")
-        f.write(", ".join(found[:80]) + "\n\n")
-
-        f.write("KEYWORDS MISSING:\n")
-        f.write(", ".join(missing[:80]) + "\n\n")
-
-        f.write("RECRUITER REVIEW:\n\n")
-        f.write(ai_feedback)
-
-    print(f"Analysis saved as {output_file}")
-
-# -------------------------
-
-if __name__ == "__main__":
-    run_analysis()
+if st.button("🚀 Run Analysis"):
+    if cv_file:
+        with st.spinner("Processing Sequential Steps..."):
+            cv_raw = extract_pdf_text(cv_file)
+            jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
+            
+            report = run_analysis(cv_raw, jd_raw)
+            if report:
+                st.markdown(report)
+                word = create_word_report(report)
+                if word:
+                    st.download_button("📩 Download Word Report", word, "Swiss_CV_Audit.docx")
+    else:
+        st.warning("Please upload a CV.")
+        

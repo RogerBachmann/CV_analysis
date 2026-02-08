@@ -1,198 +1,117 @@
 import streamlit as st
 import pdfplumber
 import google.generativeai as genai
-from textwrap import wrap
 import re
 import io
 import time
 from docxtpl import DocxTemplate, RichText
 
-# --- Page Configuration ---
-st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨🇭", layout="wide")
+# --- Configuration ---
+st.set_page_config(page_title="Swiss CV Analyser", page_icon="🇨🇭")
 
-# --- API & Password Setup ---
+# --- API Connection ---
 try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    APP_PASSWORD = st.secrets["APP_PASSWORD"]
-    genai.configure(api_key=GEMINI_API_KEY)
-except KeyError as e:
-    st.error(f"Error: Secret {e} not found.")
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    
+    # We try THREE specific model strings in order of stability. 
+    # If one works, we stop.
+    working_model = None
+    for model_name in ["gemini-1.5-flash", "gemini-flash-latest", "gemini-1.5-pro"]:
+        try:
+            test_model = genai.GenerativeModel(model_name)
+            # Minimal 'ping' to see if it's alive
+            test_model.generate_content("ping", generation_config={"max_output_tokens": 1})
+            working_model = test_model
+            break
+        except:
+            continue
+            
+    if not working_model:
+        st.error("Google API rejected all model names (404). Check AI Studio for a new key.")
+        st.stop()
+except Exception as e:
+    st.error(f"Setup Error: {e}")
     st.stop()
 
-@st.cache_resource
-def get_best_model():
-    try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        priority = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-pro"]
-        for p in priority:
-            if p in available_models: return genai.GenerativeModel(p)
-        return genai.GenerativeModel(available_models[0])
-    except Exception:
-        return genai.GenerativeModel("models/gemini-1.5-flash")
-
-model_instance = get_best_model()
-
-# --- Helper Functions ---
-def clean_text(text):
-    if not text: return ""
-    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
+# --- Functions ---
 def extract_pdf_text(file):
-    text = ""
+    if not file: return ""
     try:
         with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-            for page in pdf.pages:
-                content = page.extract_text()
-                if content: text += content + " "
-        return clean_text(text)
-    except Exception: return ""
+            return " ".join([page.extract_text() or "" for page in pdf.pages]).strip()
+    except: return ""
 
-def call_gemini(prompt):
-    if not prompt.strip(): return ""
-    for attempt in range(3):
-        try:
-            response = model_instance.generate_content(prompt)
+def call_api(prompt, label="API Task"):
+    try:
+        response = working_model.generate_content(prompt)
+        if response and response.text:
             return response.text.strip()
-        except Exception as e:
-            if "429" in str(e):
-                time.sleep(8)
-                continue
-            return ""
-    return ""
+        return "Error: Empty response from AI."
+    except Exception as e:
+        if "429" in str(e):
+            st.warning(f"Rate limited on {label}. Waiting 15s...")
+            time.sleep(15)
+            return working_model.generate_content(prompt).text.strip()
+        st.error(f"{label} failed: {e}")
+        return ""
 
-def create_word_report(report_text):
+def create_word_report(text):
     try:
         doc = DocxTemplate("template.docx")
-
-        # 1. Metadata Extraction
-        name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
-        candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
-
-        cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
-        category = cat_match.group(1) if cat_match else "IMPROVE"
-
-        # 2. Body Cleaning
-        clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
-        clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
-        clean_body = clean_body.replace("**", "").strip()
-
-        # 3. Build RichText for Word
-        # We use size=24 because docxtpl often uses half-points (24 = 12pt)
+        name = re.search(r"NAME_START:(.*?)NAME_END", text)
+        candidate = name.group(1).strip() if name else "CANDIDATE"
+        
+        # Strip identifiers for the document body
+        clean_text = re.sub(r"NAME_START:.*?NAME_END", "", text)
+        clean_text = re.sub(r"CATEGORY:.*?\n", "", clean_text).replace("**", "")
+        
         rt = RichText()
-        lines = clean_body.split('\n')
-
-        for line in lines:
-            line = line.strip()
-            
-            if not line:
-                rt.add('\n')
-                continue
-
-            if line.startswith('###') or line.startswith('##'):
-                display_text = line.lstrip('#').strip()
-                # Subheader: Navy (1D457C), 14pt (Size 28)
-                rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C')
-                rt.add(display_text, font='Calibri', size=28, color='1D457C')
-                rt.add('\n')
-            else:
-                # Body Text: Light Grey (E7E6E6), 12pt (Size 24)
-                # Ensure we add the line break explicitly
-                rt.add(line + '\n', font='Calibri', size=24, color='E7E6E6')
-                # Separating the text from the newline ensures style stability
-                rt.add(line, font='Calibri', size=24, color='E7E6E6')
-                rt.add('\n')
-
-        context = {
-            'CANDIDATE_NAME': candidate_name.upper(),
-            'REPORT_CONTENT': rt,
-            'REC_READY': "✅" if category == "READY" else "⬜",
-            'REC_IMPROVE': "✅" if category == "IMPROVE" else "⬜",
-            'REC_MAJOR': "✅" if category == "MAJOR" else "⬜",
-        }
-
-        doc.render(context)
+        rt.add(clean_text, font='Calibri', size=24)
+        doc.render({'CANDIDATE_NAME': candidate.upper(), 'REPORT_CONTENT': rt})
+        
         bio = io.BytesIO()
         doc.save(bio)
-        bio.seek(0)
-        return bio
+        return bio.getvalue()
     except Exception as e:
-        st.error(f"Formatting Error: {e}")
+        st.error(f"Word Export Error: {e}")
         return None
 
-def run_analysis(cv_text, jd_text):
-    cv_summary = call_gemini(f"Extract key career facts, technical skills, and achievements: {cv_text[:8000]}")
-    jd_summary = call_gemini(f"Extract core requirements and KPIs: {jd_text[:8000]}") if jd_text else "General Standard"
+# --- UI ---
+st.title("🇨🇭 Swiss CV Analyser")
 
-    final_prompt = f"""
-    You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the JD.
-    
-    METADATA (MANDATORY):
-    NAME_START: [Candidate Full Name] NAME_END
-    CATEGORY: [READY, IMPROVE, or MAJOR] 
-
-    INSTRUCTIONS: 
-    - Use '###' for subheadings.
-    - Do NOT include a main title.
-    - Do NOT use any bold markdown (**).
-
-    ### 1. CV PERFORMANCE SCORECARD
-    Overall Job-Fit Score: [Score]/100
-
-    ### 2. SWISS COMPLIANCE & FORMATTING
-    The Fact: [Statistic]
-    Audit: [Review]
-
-    ### 3. TECHNICAL & KEYWORD ALIGNMENT
-    The Fact: [Statistic]
-    Audit: [Mapping]
-
-    ### 4. EVIDENCE OF IMPACT (KPIs)
-    The Fact: [Statistic]
-    Audit: [Metrics]
-
-    ### 5. PRIORITY ACTION PLAN
-    1. [Task]
-    2. [Task]
-
-    CV DATA: {cv_summary}
-    JD DATA: {jd_summary}
-    """
-    return call_gemini(final_prompt)
-
-# --- UI Interface ---
-st.title("🇨🇭 Swiss CV & Job Fit Analyser")
-
-pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
-if pass_input != APP_PASSWORD:
-    st.info("Authenticate in the sidebar.")
+if st.sidebar.text_input("Password", type="password") != st.secrets["APP_PASSWORD"]:
+    st.info("Enter password in sidebar to start.")
     st.stop()
 
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or paste JD text manually", height=150)
+jd_input = st.text_area("Paste JD Text")
 
-if st.button("🚀 Run Analysis"):
+if st.button("🚀 Analyze Now"):
     if not cv_file:
-        st.warning("Please upload a CV.")
+        st.warning("Upload a CV first.")
     else:
-        with st.spinner("Analyzing..."):
+        with st.spinner("Processing..."):
             cv_raw = extract_pdf_text(cv_file)
-            jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
-
-            if not cv_raw:
-                st.error("Extraction failed.")
-            else:
-                report = run_analysis(cv_raw, jd_raw)
-                st.divider()
-                st.markdown(report)
-
-                word_file = create_word_report(report)
-                if word_file:
-                    st.download_button(
-                        label="📩 Download Branded Word Report",
-                        data=word_file,
-                        file_name="Swiss_CV_Audit.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
-                    
+            
+            # Phase 1: Summary
+            cv_summary = call_api(f"Summarize skills and experience: {cv_raw[:6000]}", "CV Analysis")
+            time.sleep(5) # Prevent 429
+            
+            # Phase 2: Audit
+            prompt = f"""
+            You are a Swiss Life Sciences Recruiter.
+            Analyze this CV: {cv_summary} 
+            Against this JD: {jd_input[:4000]}
+            
+            Output MUST include:
+            NAME_START: [Name] NAME_END
+            CATEGORY: [READY, IMPROVE, or MAJOR]
+            Then a full scorecard and audit.
+            """
+            final_report = call_api(prompt, "Final Audit")
+            
+            if final_report:
+                st.markdown(final_report)
+                file_data = create_word_report(final_report)
+                if file_data:
+                    st.download_button("📩 Download Word Report", file_data, "CV_Audit.docx")

@@ -6,112 +6,110 @@ import io
 import time
 from docxtpl import DocxTemplate, RichText
 
-# --- Configuration ---
+# --- Page Config ---
 st.set_page_config(page_title="Swiss CV Analyser", page_icon="🇨🇭")
 
-# --- API Connection ---
+# --- API Setup ---
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    # Ensure the API Key is set
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=API_KEY)
     
-    # We try THREE specific model strings in order of stability. 
-    # If one works, we stop.
+    # This list covers all naming conventions (with and without prefixes)
+    # The code will stop at the FIRST one that doesn't 404.
+    MODEL_NAMES = [
+        "gemini-1.5-flash", 
+        "gemini-1.5-flash-latest", 
+        "models/gemini-1.5-flash",
+        "gemini-pro"
+    ]
+    
     working_model = None
-    for model_name in ["gemini-1.5-flash", "gemini-flash-latest", "gemini-1.5-pro"]:
+    for name in MODEL_NAMES:
         try:
-            test_model = genai.GenerativeModel(model_name)
-            # Minimal 'ping' to see if it's alive
-            test_model.generate_content("ping", generation_config={"max_output_tokens": 1})
-            working_model = test_model
-            break
+            m = genai.GenerativeModel(name)
+            # Short test call
+            m.generate_content("test", generation_config={"max_output_tokens": 1})
+            working_model = m
+            break 
         except:
             continue
-            
+
     if not working_model:
-        st.error("Google API rejected all model names (404). Check AI Studio for a new key.")
+        st.error("Connection Failed: All model variants returned 404. Please generate a NEW API Key at aistudio.google.com.")
         st.stop()
 except Exception as e:
-    st.error(f"Setup Error: {e}")
+    st.error(f"Initialization Error: {e}")
     st.stop()
 
-# --- Functions ---
-def extract_pdf_text(file):
-    if not file: return ""
+# --- Core Logic Functions ---
+def extract_text(file):
     try:
         with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-            return " ".join([page.extract_text() or "" for page in pdf.pages]).strip()
+            return " ".join([p.extract_text() for p in pdf.pages if p.extract_text()])
     except: return ""
 
-def call_api(prompt, label="API Task"):
+def call_ai(prompt):
     try:
-        response = working_model.generate_content(prompt)
-        if response and response.text:
-            return response.text.strip()
-        return "Error: Empty response from AI."
+        # Standard call with no complex parameters to minimize errors
+        res = working_model.generate_content(prompt)
+        return res.text.strip()
     except Exception as e:
         if "429" in str(e):
-            st.warning(f"Rate limited on {label}. Waiting 15s...")
             time.sleep(15)
             return working_model.generate_content(prompt).text.strip()
-        st.error(f"{label} failed: {e}")
         return ""
 
-def create_word_report(text):
+def generate_docx(report_text):
     try:
         doc = DocxTemplate("template.docx")
-        name = re.search(r"NAME_START:(.*?)NAME_END", text)
-        candidate = name.group(1).strip() if name else "CANDIDATE"
+        name_search = re.search(r"NAME_START:(.*?)NAME_END", report_text)
+        name = name_search.group(1).strip() if name_search else "CANDIDATE"
         
-        # Strip identifiers for the document body
-        clean_text = re.sub(r"NAME_START:.*?NAME_END", "", text)
-        clean_text = re.sub(r"CATEGORY:.*?\n", "", clean_text).replace("**", "")
+        # Strip markers for the final document
+        body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
+        body = re.sub(r"CATEGORY:.*?\n", "", body).replace("**", "").strip()
         
         rt = RichText()
-        rt.add(clean_text, font='Calibri', size=24)
-        doc.render({'CANDIDATE_NAME': candidate.upper(), 'REPORT_CONTENT': rt})
+        rt.add(body, font='Calibri', size=24)
+        doc.render({'CANDIDATE_NAME': name.upper(), 'REPORT_CONTENT': rt})
         
-        bio = io.BytesIO()
-        doc.save(bio)
-        return bio.getvalue()
-    except Exception as e:
-        st.error(f"Word Export Error: {e}")
-        return None
+        out = io.BytesIO()
+        doc.save(out)
+        return out.getvalue()
+    except: return None
 
-# --- UI ---
+# --- UI Layout ---
 st.title("🇨🇭 Swiss CV Analyser")
 
+# Sidebar Auth
 if st.sidebar.text_input("Password", type="password") != st.secrets["APP_PASSWORD"]:
-    st.info("Enter password in sidebar to start.")
     st.stop()
 
-cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_input = st.text_area("Paste JD Text")
+cv_up = st.file_uploader("Upload CV (PDF)", type=["pdf"])
+jd_up = st.text_area("Paste JD")
 
-if st.button("🚀 Analyze Now"):
-    if not cv_file:
-        st.warning("Upload a CV first.")
+if st.button("🚀 Run Analysis"):
+    if cv_up:
+        with st.spinner("Analyzing..."):
+            cv_raw = extract_text(cv_up)
+            
+            # Step 1: Summary (keeps payload small to avoid 429)
+            cv_sum = call_ai(f"Summary of CV: {cv_raw[:5000]}")
+            time.sleep(5)
+            
+            # Step 2: Final Report
+            report = call_ai(f"""
+                Swiss Recruiter Mode. 
+                Match this CV: {cv_sum} 
+                To this JD: {jd_up[:4000]}
+                Format: NAME_START: [Name] NAME_END, CATEGORY: [READY/IMPROVE/MAJOR], then full audit.
+            """)
+            
+            if report:
+                st.markdown(report)
+                docx_data = generate_docx(report)
+                if docx_data:
+                    st.download_button("📩 Download Report", docx_data, "Audit.docx")
     else:
-        with st.spinner("Processing..."):
-            cv_raw = extract_pdf_text(cv_file)
-            
-            # Phase 1: Summary
-            cv_summary = call_api(f"Summarize skills and experience: {cv_raw[:6000]}", "CV Analysis")
-            time.sleep(5) # Prevent 429
-            
-            # Phase 2: Audit
-            prompt = f"""
-            You are a Swiss Life Sciences Recruiter.
-            Analyze this CV: {cv_summary} 
-            Against this JD: {jd_input[:4000]}
-            
-            Output MUST include:
-            NAME_START: [Name] NAME_END
-            CATEGORY: [READY, IMPROVE, or MAJOR]
-            Then a full scorecard and audit.
-            """
-            final_report = call_api(prompt, "Final Audit")
-            
-            if final_report:
-                st.markdown(final_report)
-                file_data = create_word_report(final_report)
-                if file_data:
-                    st.download_button("📩 Download Word Report", file_data, "CV_Audit.docx")
+        st.warning("Please upload a CV.")

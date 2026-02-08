@@ -78,12 +78,12 @@ def create_word_report(report_text):
         clean_body = clean_body.replace("**", "").strip()
 
         # 3. Build RichText for Word
-        # We use size=24 because docxtpl often uses half-points (24 = 12pt)
         rt = RichText()
         lines = clean_body.split('\n')
         
         for line in lines:
             line = line.strip()
+            
             if not line:
                 rt.add('\n')
                 continue
@@ -91,11 +91,13 @@ def create_word_report(report_text):
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
                 # Subheader: Navy (1D457C), 14pt (Size 28)
-                rt.add('\n' + display_text + '\n', font='Calibri', size=28, color='1D457C')
+                rt.add(display_text, font='Calibri', size=28, color='1D457C')
+                rt.add('\n')
             else:
                 # Body Text: Light Grey (E7E6E6), 12pt (Size 24)
-                # Ensure we add the line break explicitly
-                rt.add(line + '\n', font='Calibri', size=24, color='E7E6E6')
+                # Separating the text from the newline ensures style stability
+                rt.add(line, font='Calibri', size=24, color='E7E6E6')
+                rt.add('\n')
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),

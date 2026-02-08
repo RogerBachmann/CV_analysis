@@ -3,102 +3,57 @@ import pdfplumber
 import google.generativeai as genai
 import re
 import io
-import time
 from docxtpl import DocxTemplate, RichText
 
-# --- Page Configuration ---
-st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨🇭", layout="wide")
+# --- Setup ---
+st.set_page_config(page_title="Swiss CV Analyser", layout="wide")
 
-# --- API & Password Setup ---
 try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    APP_PASSWORD = st.secrets["APP_PASSWORD"]
-    genai.configure(api_key=GEMINI_API_KEY)
-except KeyError as e:
-    st.error(f"Error: Secret {e} not found.")
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+except Exception as e:
+    st.error(f"Configuration Error: {e}")
     st.stop()
 
-@st.cache_resource
-def get_best_model():
-    try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        priority = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-pro"]
-        for p in priority:
-            if p in available_models: return genai.GenerativeModel(p)
-        return genai.GenerativeModel(available_models[0])
-    except Exception:
-        return genai.GenerativeModel("models/gemini-1.5-flash")
-
-model_instance = get_best_model()
-
-# --- Helper Functions ---
-def clean_text(text):
-    if not text: return ""
-    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
 def extract_pdf_text(file):
-    text = ""
     try:
         with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-            for page in pdf.pages:
-                content = page.extract_text()
-                if content: text += content + " "
-        return clean_text(text)
-    except Exception: return ""
-
-def call_gemini(prompt):
-    if not prompt.strip(): return ""
-    for attempt in range(3):
-        try:
-            response = model_instance.generate_content(prompt)
-            return response.text.strip()
-        except Exception as e:
-            if "429" in str(e):
-                time.sleep(8)
-                continue
-            return ""
-    return ""
+            return " ".join([page.extract_text() or "" for page in pdf.pages])
+    except: return ""
 
 def create_word_report(report_text):
     try:
         doc = DocxTemplate("template.docx")
         
-        # 1. Metadata Extraction
-        name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
-        candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
-        cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
-        category = cat_match.group(1) if cat_match else "IMPROVE"
-
-        # 2. Body Cleaning (Aggressive Bold Scrubbing)
-        clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
-        clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
-        # Remove markdown bold (**) and extra symbols
-        clean_body = clean_body.replace("**", "").replace("__", "").strip()
-
-        # 3. Build RichText with Total Control
-        rt = RichText()
-        lines = clean_body.split('\n')
+        # Metadata parsing
+        name = re.search(r"NAME_START:(.*?)NAME_END", report_text, re.S)
+        candidate_name = name.group(1).strip() if name else "CANDIDATE"
         
-        for line in lines:
-            line_content = line.strip()
-            
-            if not line_content:
-                # Add a blank line with standard body properties to prevent "bold carry-over"
-                rt.add('\n', font='Calibri', size=24, bold=False, italic=False)
+        cat = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
+        category = cat.group(1) if cat else "IMPROVE"
+
+        # Content Scrubbing
+        body = re.sub(r"NAME_START:.*?NAME_END", "", report_text, flags=re.S)
+        body = re.sub(r"CATEGORY:.*?\n", "", body)
+        body = body.replace("**", "").replace("__", "").strip()
+
+        # Build RichText - Force Calibri and No Bold on every segment
+        rt = RichText()
+        for line in body.split('\n'):
+            clean_line = line.strip()
+            if not clean_line:
+                rt.add('\n', font='Calibri', size=24, bold=False)
                 continue
             
-            if line_content.startswith('###') or line_content.startswith('##'):
-                # SUBHEADING: Blue 2F5496, 14pt (28), No Bold
-                display_header = line_content.lstrip('#').strip()
-                rt.add(display_header, font='Calibri', size=28, color='2F5496', bold=False, italic=False)
-                # Add newline separately to reset the "Run"
-                rt.add('\n', font='Calibri', size=28, bold=False)
+            if clean_line.startswith('###') or clean_line.startswith('##'):
+                # Subheaders: Blue, 14pt (28), No Bold
+                rt.add(clean_line.lstrip('#').strip(), font='Calibri', size=28, color='2F5496', bold=False)
             else:
-                # BODY: Black, 12pt (24), No Bold
-                rt.add(line_content, font='Calibri', size=24, color='000000', bold=False, italic=False)
-                # Add newline separately
-                rt.add('\n', font='Calibri', size=24, bold=False)
+                # Body: Black, 12pt (24), No Bold
+                rt.add(clean_line, font='Calibri', size=24, color='000000', bold=False)
+            
+            rt.add('\n', font='Calibri', size=24, bold=False)
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),
@@ -114,81 +69,54 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Formatting Error: {e}")
+        st.error(f"Word Error: {e}")
         return None
 
-def run_analysis(cv_text, jd_text):
-    cv_summary = call_gemini(f"Extract career facts: {cv_text[:8000]}")
-    jd_summary = call_gemini(f"Extract core requirements: {jd_text[:8000]}") if jd_text else "General Standard"
+# --- UI ---
+st.title("🇨🇭 Swiss CV Analyser")
 
-    final_prompt = f"""
-    You are a Senior Swiss Life Sciences Recruiter. Analyze this CV.
-    
-    METADATA (MANDATORY):
-    NAME_START: [Candidate Full Name] NAME_END
-    CATEGORY: [READY, IMPROVE, or MAJOR] 
+pw = st.sidebar.text_input("Password", type="password")
+if pw == st.secrets["APP_PASSWORD"]:
+    cv_file = st.file_uploader("Upload CV", type=["pdf"])
+    jd_text = st.text_area("Job Description", height=150)
 
-    INSTRUCTIONS: 
-    - Use '###' for subheadings.
-    - NEVER use bold markdown (**).
-    - Provide professional, clear auditing.
-
-    ### 1. CV PERFORMANCE SCORECARD
-    Overall Job-Fit Score: [Score]/100
-
-    ### 2. SWISS COMPLIANCE & FORMATTING
-    Fact: [Statistic]
-    Audit: [Review]
-
-    ### 3. TECHNICAL & KEYWORD ALIGNMENT
-    Fact: [Statistic]
-    Audit: [Mapping]
-
-    ### 4. EVIDENCE OF IMPACT (KPIs)
-    Fact: [Statistic]
-    Audit: [Metrics]
-
-    ### 5. PRIORITY ACTION PLAN
-    1. [Task]
-    2. [Task]
-
-    CV DATA: {cv_summary}
-    JD DATA: {jd_summary}
-    """
-    return call_gemini(final_prompt)
-
-# --- UI Interface ---
-st.title("🇨🇭 Swiss CV & Job Fit Analyser")
-
-pass_input = st.sidebar.text_input("Enter Admin Password", type="password")
-if pass_input != APP_PASSWORD:
-    st.info("Authenticate in the sidebar.")
-    st.stop()
-
-cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
-jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or paste JD text manually", height=150)
-
-if st.button("🚀 Run Analysis"):
-    if not cv_file:
-        st.warning("Please upload a CV.")
-    else:
-        with st.spinner("Analyzing..."):
-            cv_raw = extract_pdf_text(cv_file)
-            jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
-            
-            if not cv_raw:
-                st.error("Extraction failed.")
-            else:
-                report = run_analysis(cv_raw, jd_raw)
-                st.divider()
-                st.markdown(report)
+    if st.button("🚀 Analyze"):
+        if not cv_file:
+            st.warning("Upload a CV first.")
+        else:
+            with st.spinner("Analyzing..."):
+                cv_raw = extract_pdf_text(cv_file)
                 
-                word_file = create_word_report(report)
-                if word_file:
-                    st.download_button(
-                        label="📩 Download Word Report",
-                        data=word_file,
-                        file_name="Swiss_CV_Audit.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    )
+                # Single prompt to guarantee output and format
+                prompt = f"""
+                Analyze this CV for the Swiss Life Sciences market against the JD.
+                CV: {cv_raw[:9000]}
+                JD: {jd_text[:4000]}
+
+                Strict Format:
+                NAME_START: [Name] NAME_END
+                CATEGORY: [READY/IMPROVE/MAJOR]
+
+                ### 1. SCORECARD
+                [Score]/100
+                ### 2. SWISS COMPLIANCE
+                [Audit]
+                ### 3. TECHNICAL FIT
+                [Mapping]
+                ### 4. ACTION PLAN
+                - [Action]
+
+                Rules: NO Bold (**), NO Italics. Use '###' for headers.
+                """
+                
+                try:
+                    res = model.generate_content(prompt)
+                    if res and res.text:
+                        st.markdown(res.text)
+                        doc_file = create_word_report(res.text)
+                        if doc_file:
+                            st.download_button("📩 Download Report", doc_file, "Swiss_Audit.docx")
+                    else:
+                        st.error("AI returned no text. Try again.")
+                except Exception as e:
+                    st.error(f"AI Error: {e}")

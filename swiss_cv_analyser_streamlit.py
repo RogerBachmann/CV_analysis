@@ -95,7 +95,7 @@ def create_word_report(report_text):
                 rt.add('\n')
             else:
                 # Body Text: Light Grey (E7E6E6), 12pt (Size 24)
-                # Separating the text from the newline ensures style stability
+                # We apply formatting to the line and the newline separately
                 rt.add(line, font='Calibri', size=24, color='E7E6E6')
                 rt.add('\n')
 

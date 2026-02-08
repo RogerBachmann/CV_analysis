@@ -19,11 +19,20 @@ except KeyError as e:
     st.stop()
 
 @st.cache_resource
-def get_best_model():
-    # Use 1.5-flash as it is most stable for high-volume text
-    return genai.GenerativeModel("models/gemini-1.5-flash")
+def get_working_model():
+    """Dynamically finds an available model to prevent 404 errors."""
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # Prioritize flash for speed/reliability
+                if "flash" in m.name:
+                    return genai.GenerativeModel(m.name)
+        # Fallback to a hardcoded string if list fails
+        return genai.GenerativeModel("gemini-1.5-flash")
+    except Exception:
+        return genai.GenerativeModel("gemini-1.5-flash")
 
-model_instance = get_best_model()
+model_instance = get_working_model()
 
 # --- Helper Functions ---
 def extract_pdf_text(file):
@@ -35,16 +44,14 @@ def extract_pdf_text(file):
                 if content: text += content + " "
         return text.strip()
     except Exception as e:
-        st.error(f"PDF Extraction Error: {e}")
-        return ""
+        return f"ERROR_PDF: {str(e)}"
 
 def call_gemini(prompt):
     try:
         response = model_instance.generate_content(prompt)
         if response and response.text:
             return response.text.strip()
-        else:
-            return "ERROR: AI returned an empty response. Check safety filters."
+        return "AI ERROR: Empty response from model."
     except Exception as e:
         return f"AI ERROR: {str(e)}"
 
@@ -59,7 +66,7 @@ def create_word_report(report_text):
         cat_match = re.search(r"CATEGORY:\s*(READY|IMPROVE|MAJOR)", report_text, re.IGNORECASE)
         category = cat_match.group(1).upper() if cat_match else "IMPROVE"
 
-        # Content Cleaning
+        # Content Cleaning (Remove Metadata and Markdown Bolding)
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text, flags=re.DOTALL)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
         clean_body = clean_body.replace("**", "")
@@ -74,10 +81,11 @@ def create_word_report(report_text):
                 continue
             
             if line.startswith('###'):
-                # 13pt (Size 26), Blue (2F5496)
-                rt.add('\n' + line.replace('#', '').strip() + '\n', font='Calibri', size=26, color='2F5496', bold=False)
+                # Header: 13pt (Size 26), Blue (2F5496), No Bold
+                header_text = line.replace('#', '').strip()
+                rt.add('\n' + header_text + '\n', font='Calibri', size=26, color='2F5496', bold=False)
             else:
-                # 12pt (Size 24), Black
+                # Body: 12pt (Size 24), Black (000000), No Bold
                 rt.add(line + '\n', font='Calibri', size=24, color='000000', bold=False)
 
         context = {
@@ -93,14 +101,17 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Word Generation Error: {e}")
+        st.error(f"Formatting Error: {e}")
         return None
 
-# --- UI ---
+# --- UI Interface ---
 st.title("🇨🇭 Swiss CV Analyser")
 
-if "report" not in st.session_state: st.session_state.report = None
-if "word" not in st.session_state: st.session_state.word = None
+# Persist data using Session State
+if "final_report" not in st.session_state:
+    st.session_state.final_report = None
+if "word_bytes" not in st.session_state:
+    st.session_state.word_bytes = None
 
 pass_input = st.sidebar.text_input("Password", type="password")
 
@@ -111,50 +122,60 @@ if pass_input == APP_PASSWORD:
 
     if st.button("🚀 Run Analysis"):
         if cv_file:
-            with st.spinner("Processing..."):
+            with st.spinner("Processing Analysis..."):
                 cv_text = extract_pdf_text(cv_file)
                 jd_text = extract_pdf_text(jd_file) if jd_file else jd_manual
                 
-                if not cv_text:
-                    st.error("No text found in CV. Is it a scanned image?")
+                if "ERROR_PDF" in cv_text:
+                    st.error(cv_text)
                 else:
-                    # Explicit prompt for structured analysis
                     prompt = f"""
-                    You are a Senior Swiss Recruiter. Analyze this CV against the JD.
+                    You are a Senior Swiss Recruiter. Analyze this CV.
                     
-                    NAME_START: [Name] NAME_END
+                    NAME_START: [Candidate Name] NAME_END
                     CATEGORY: [READY, IMPROVE, or MAJOR]
 
                     ### 1. PERFORMANCE SCORECARD
-                    [Provide score and fit]
+                    [Score]/100 - Brief overview.
 
                     ### 2. SWISS COMPLIANCE
-                    [Audit formatting/standards]
+                    [Audit formatting]
 
                     ### 3. TECHNICAL ALIGNMENT
-                    [Check keywords/skills]
+                    [Skills match]
 
                     ### 4. ACTION PLAN
-                    [List improvements]
+                    [Improvement steps]
 
-                    CV TEXT: {cv_text[:12000]}
-                    JD TEXT: {jd_text[:4000] if jd_text else "General Life Sciences Standards"}
+                    INSTRUCTIONS: No bold (**). Use ### for headers.
+                    
+                    CV: {cv_text[:12000]}
+                    JD: {jd_text[:4000] if jd_text else "Swiss Industry Standards"}
                     """
                     
-                    result = call_gemini(prompt)
-                    st.session_state.report = result
-                    st.session_state.word = create_word_report(result)
+                    analysis_result = call_gemini(prompt)
+                    st.session_state.final_report = analysis_result
+                    st.session_state.word_bytes = create_word_report(analysis_result)
         else:
             st.warning("Please upload a CV.")
 
-    # Persistent Display
-    if st.session_state.report:
+    # Show results
+    if st.session_state.final_report:
         st.divider()
-        if "AI ERROR" in st.session_state.report:
-            st.error(st.session_state.report)
+        if "AI ERROR" in st.session_state.final_report:
+            st.error(st.session_state.final_report)
         else:
-            st.markdown(st.session_state.report)
-            if st.session_state.word:
-                st.download_button("📩 Download Report", st.session_state.word, "Swiss_CV_Audit.docx")
+            # Clean UI preview (removing metadata tags)
+            display_text = re.sub(r"NAME_START:.*?NAME_END", "", st.session_state.final_report, flags=re.DOTALL)
+            display_text = re.sub(r"CATEGORY:.*?\n", "", display_text)
+            st.markdown(display_text)
+            
+            if st.session_state.word_bytes:
+                st.download_button(
+                    label="📩 Download Report",
+                    data=st.session_state.word_bytes,
+                    file_name="Swiss_CV_Audit.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
 else:
-    st.info("Enter password to begin.")
+    st.info("Authentication required.")

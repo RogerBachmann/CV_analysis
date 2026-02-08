@@ -85,18 +85,19 @@ def create_word_report(report_text):
             line = line.strip()
             
             if not line:
-                rt.add('\n')
+                # Explicitly non-bold newline
+                rt.add('\n', font='Calibri', size=24, bold=False)
                 continue
             
             if line.startswith('###') or line.startswith('##'):
                 display_text = line.lstrip('#').strip()
-                # Subheading: Blue (2F5496), 14pt (Size 28), No Bold
+                # Subheading: Blue (2F5496), 14pt (Size 28), Force No Bold
                 rt.add(display_text, font='Calibri', size=28, color='2F5496', bold=False)
-                rt.add('\n')
+                rt.add('\n', font='Calibri', size=28, bold=False)
             else:
-                # Body Text: Black (000000), 12pt (Size 24), No Bold
+                # Body Text: Black (000000), 12pt (Size 24), Force No Bold
                 rt.add(line, font='Calibri', size=24, color='000000', bold=False)
-                rt.add('\n')
+                rt.add('\n', font='Calibri', size=24, bold=False)
 
         context = {
             'CANDIDATE_NAME': candidate_name.upper(),

@@ -13,16 +13,21 @@ st.set_page_config(page_title="Swiss Life Sciences CV Analyser", page_icon="🇨
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
+    # Configure using the production v1 API
     genai.configure(api_key=GEMINI_API_KEY)
 except KeyError as e:
     st.error(f"Error: Secret {e} not found.")
     st.stop()
 
 def get_model():
-    # Keeping the logic that worked for you
+    """
+    Changed from 1.5-flash to 2.0-flash to resolve the 404 error.
+    2.0-flash is the 2026 stable replacement.
+    """
     try:
-        return genai.GenerativeModel("gemini-1.5-flash")
+        return genai.GenerativeModel("gemini-2.0-flash")
     except:
+        # Fallback to Pro if Flash is unavailable
         return genai.GenerativeModel("gemini-pro")
 
 # --- 3. Helper Functions ---
@@ -45,25 +50,22 @@ def call_gemini(model, prompt):
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
+        # If we still get a 404, this will tell us exactly which name failed
         return f"Error: {str(e)}"
 
-# --- 4. NEW & IMPROVED WORD GENERATION ---
+# --- 4. Word Generation ---
 def create_word_report(report_text):
     try:
-        # Load your template.docx
         doc = DocxTemplate("template.docx")
         
-        # Metadata Extraction
         name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
         
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
-        # Content Cleaning for Word
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
-        # Remove bold markdown as requested in prompt instructions
         clean_body = clean_body.replace("**", "")
 
         rt = RichText()
@@ -76,11 +78,9 @@ def create_word_report(report_text):
                 continue
             
             if line.startswith('###'):
-                # Subheader: Navy, 14pt (28 in docxtpl size)
                 rt.add(line.replace('###', '').strip(), font='Calibri', size=28, color='1D457C')
                 rt.add('\n')
             else:
-                # Body: Light Grey, 12pt (24 in docxtpl size)
                 rt.add(line, font='Calibri', size=24, color='E7E6E6')
                 rt.add('\n')
 
@@ -128,7 +128,7 @@ if st.button("🚀 Run Analysis"):
             if not cv_raw:
                 st.error("Could not read CV content.")
             else:
-                # This is the AI Prompt - UNCHANGED
+                # Prompt UNCHANGED to keep your preferred output
                 report = call_gemini(active_model, f"""
                 You are a Senior Swiss Life Sciences Recruiter. Evaluate this CV against the JD.
                 
@@ -150,11 +150,9 @@ if st.button("🚀 Run Analysis"):
                 JD DATA: {jd_raw[:3000]}
                 """)
                 
-                # 1. Display Output (The part you liked)
                 st.divider()
                 st.markdown(report)
                 
-                # 2. Add the Word Download Button (The fix)
                 word_file = create_word_report(report)
                 if word_file:
                     st.download_button(

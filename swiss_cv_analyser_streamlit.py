@@ -19,16 +19,36 @@ except KeyError as e:
     st.stop()
 
 @st.cache_resource
-def get_best_model():
+def get_best_available_model():
+    """
+    Dynamically finds the best available Flash model for your API key.
+    This prevents 404 errors when Google retires old models (like 1.5-flash).
+    """
     try:
-        # Use the most stable 2026 model names
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        return model
+        # Get all models that support content generation
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 2026 Priority List (Newest to Oldest)
+        priority = [
+            "models/gemini-3-flash", 
+            "models/gemini-3-flash-preview",
+            "models/gemini-2.5-flash",
+            "models/gemini-2.0-flash",
+            "models/gemini-1.5-flash-latest" # Legacy fallback
+        ]
+        
+        for p in priority:
+            if p in models:
+                return genai.GenerativeModel(p)
+        
+        # Absolute fallback: use the first available model in the list
+        return genai.GenerativeModel(models[0])
     except Exception as e:
-        st.sidebar.error(f"Model Initialization Error: {e}")
-        return None
+        st.sidebar.error(f"Critical: Could not list models. {e}")
+        # Defaulting to the standard 2.5/3 stable name if listing fails
+        return genai.GenerativeModel("gemini-2.5-flash")
 
-model_instance = get_best_model()
+model_instance = get_best_available_model()
 
 # --- Helper Functions ---
 def clean_text(text):
@@ -40,7 +60,7 @@ def extract_pdf_text(file):
     if file is None: return ""
     text = ""
     try:
-        # CRITICAL: Reset file pointer in case it was read elsewhere
+        # Reset file pointer to ensure we read from the start
         file.seek(0) 
         with pdfplumber.open(io.BytesIO(file.read())) as pdf:
             for page in pdf.pages:
@@ -53,38 +73,39 @@ def extract_pdf_text(file):
 
 def call_gemini(prompt):
     if not prompt.strip(): return "Error: Empty Prompt"
-    if not model_instance: return "Error: Model not initialized"
     
     for attempt in range(3):
         try:
             response = model_instance.generate_content(prompt)
             if response and response.text:
                 return response.text.strip()
-            else:
-                return "Error: AI returned an empty response (check safety filters)."
+            return "Error: AI returned an empty response."
         except Exception as e:
             err_msg = str(e)
-            if "429" in err_msg:
+            if "429" in err_msg: # Rate Limit
                 st.warning(f"Rate limit hit. Retrying in 10s... ({attempt+1}/3)")
                 time.sleep(10)
                 continue
-            elif "403" in err_msg:
-                return f"Authentication Error: {err_msg}. Ensure 2-Step Verification is ON in Google Cloud."
+            elif "403" in err_msg: # Security / MFA
+                return f"Authentication Blocked: Enable 2-Step Verification in Google Cloud. Details: {err_msg}"
+            elif "404" in err_msg: # Model Not Found
+                return f"Model Error (404): The requested model version is no longer available. Please refresh the app."
             else:
                 return f"API Error: {err_msg}"
     return "Error: Maximum retries reached."
 
 def create_word_report(report_text):
     try:
-        # Ensure template.docx exists in your repo
         doc = DocxTemplate("template.docx")
         
+        # Metadata Parsing
         name_match = re.search(r"NAME_START:(.*?)NAME_END", report_text)
         candidate_name = name_match.group(1).strip() if name_match else "CANDIDATE"
         
         cat_match = re.search(r"CATEGORY:(READY|IMPROVE|MAJOR)", report_text)
         category = cat_match.group(1) if cat_match else "IMPROVE"
 
+        # Content Cleaning
         clean_body = re.sub(r"NAME_START:.*?NAME_END", "", report_text)
         clean_body = re.sub(r"CATEGORY:.*?\n", "", clean_body)
         clean_body = clean_body.replace("**", "").strip()
@@ -120,12 +141,12 @@ def create_word_report(report_text):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Formatting Error: {e}")
+        st.error(f"Word Generation Error: {e}")
         return None
 
 def run_analysis(cv_text, jd_text):
-    # Truncate to save tokens and avoid quota spikes
-    cv_summary = call_gemini(f"Extract key career facts and technical skills: {cv_text[:5000]}")
+    # Summaries to stay within Free Tier token limits
+    cv_summary = call_gemini(f"Extract career facts and skills: {cv_text[:6000]}")
     jd_summary = call_gemini(f"Extract core requirements: {jd_text[:3000]}") if jd_text else "General Standard"
 
     final_prompt = f"""
@@ -137,6 +158,7 @@ def run_analysis(cv_text, jd_text):
 
     INSTRUCTIONS: 
     - Use '###' for subheadings.
+    - Do NOT include a main title.
     - Do NOT use any bold markdown (**).
 
     ### 1. CV PERFORMANCE SCORECARD
@@ -164,44 +186,41 @@ def run_analysis(cv_text, jd_text):
 st.title("🇨🇭 Swiss CV & Job Fit Analyser")
 
 with st.sidebar:
-    st.header("Authentication")
-    pass_input = st.text_input("Enter Admin Password", type="password")
+    st.header("Admin Access")
+    pass_input = st.text_input("Password", type="password")
     if pass_input != APP_PASSWORD:
-        st.info("Please authenticate to continue.")
+        st.info("Authenticate in the sidebar.")
         st.stop()
     st.success("Authenticated")
-    if model_instance:
-        st.write("🟢 AI Connection Active")
+    st.write(f"🤖 **Model:** {model_instance.model_name}")
 
 cv_file = st.file_uploader("Upload CV (PDF)", type=["pdf"])
 jd_file = st.file_uploader("Upload JD (PDF)", type=["pdf"])
-jd_manual = st.text_area("Or paste JD text manually", height=150)
+jd_manual = st.text_area("Or paste JD text", height=100)
 
 if st.button("🚀 Run Analysis"):
     if not cv_file:
         st.warning("Please upload a CV.")
     else:
-        with st.spinner("Analyzing with Gemini AI..."):
+        with st.spinner("Analyzing..."):
             cv_raw = extract_pdf_text(cv_file)
             jd_raw = extract_pdf_text(jd_file) if jd_file else jd_manual
             
             if not cv_raw:
-                st.error("Could not extract text from CV. Is the PDF empty or scanned?")
+                st.error("Extraction failed.")
             else:
                 report = run_analysis(cv_raw, jd_raw)
                 st.divider()
                 
-                # Check if the report is actually content or an error message
-                if "Error" in report or "API" in report:
+                if "Error" in report or "Authentication" in report:
                     st.error(report)
                 else:
                     st.markdown(report)
-                    
                     word_file = create_word_report(report)
                     if word_file:
                         st.download_button(
-                            label="📩 Download Branded Word Report",
+                            label="📩 Download Report",
                             data=word_file,
-                            file_name="Swiss_CV_Audit.docx",
+                            file_name=f"CV_Audit_{int(time.time())}.docx",
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
